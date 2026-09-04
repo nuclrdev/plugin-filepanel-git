@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "version": "${project.version}",
+  "platformSdkVersion": "${platform.sdk.version}",
+	"plugins": [
+		{
+			"class": "dev.nuclr.plugin.core.panel.git.GitFilePanelPlugin",
+			"type": "FilePanel",
+			"id": "dev.nuclr.plugin.core.panel.git",
+			"name": "Git Panel",
+			"version": "${project.version}",
+			"description": "Browse Git working trees, status, branches, commits, tags and stashes as a filesystem.",
+			"author": "Nuclr Development Team",
+			"license": "Apache-2.0",
+			"website": "https://nuclr.dev",
+			"pageUrl": "https://github.com/nuclrdev/plugin-filepanel-git",
+			"docUrl": "https://github.com/nuclrdev/plugin-filepanel-git",
+			"developer": "Official",
+			"singleton": false
+		},
+		{
+			"class": "dev.nuclr.plugin.core.panel.git.GitQuickViewPlugin",
+			"type": "QuickView",
+			"id": "dev.nuclr.plugin.core.panel.git.quickview",
+			"name": "Git Quick View",
+			"version": "${project.version}",
+			"description": "Shows Git diffs, commit details and historical file content.",
+			"author": "Nuclr Development Team",
+			"license": "Apache-2.0",
+			"website": "https://nuclr.dev",
+			"pageUrl": "https://github.com/nuclrdev/plugin-filepanel-git",
+			"docUrl": "https://github.com/nuclrdev/plugin-filepanel-git",
+			"developer": "Official",
+			"singleton": true,
+			"priority": 0
+		}
+	]
+}

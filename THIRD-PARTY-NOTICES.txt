@@ -1,0 +1,17 @@
+Third-Party Notices
+===================
+
+Eclipse JGit
+------------
+Copyright (c) Eclipse JGit contributors.
+Licensed under the Eclipse Distribution License 1.0.
+https://www.eclipse.org/jgit/
+
+SLF4J
+-----
+Copyright (c) QOS.ch.
+Licensed under the MIT License.
+https://www.slf4j.org/
+
+This product also uses transitive dependencies distributed with Eclipse JGit.
+Their license files are included in their respective JAR files.
