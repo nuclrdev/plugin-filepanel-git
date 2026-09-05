@@ -93,6 +93,72 @@ class GitFilePanelPluginTest {
 		plugin.unload();
 	}
 
+	@Test
+	void copiesLocalWorktreeFileIntoOppositeLocalPanel() throws Exception {
+		Path root = repository(temp.resolve("repo-copy-local"));
+		Path destination = Files.createDirectory(temp.resolve("destination-local"));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+
+		GitResource source = new GitResource(
+				new GitNode(GitNode.Kind.WORKTREE_FILE, root.toString(), null, "tracked.txt", null),
+				null, "tracked.txt", false, root.resolve("tracked.txt"), 8);
+		RecordingCallback callback = new RecordingCallback();
+
+		plugin.act(new DestinationPanel(destination), "filepanel.copy", List.of(source), source, new HashMap<>(), callback);
+
+		assertTrue(callback.finished.await(5, TimeUnit.SECONDS));
+		assertEquals("initial\n", Files.readString(destination.resolve("tracked.txt")));
+		plugin.unload();
+	}
+
+	@Test
+	void exposesQuickViewForVirtualCommitEntries() throws Exception {
+		Path root = repository(temp.resolve("repo-quick-view"));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+		String head;
+		try (Git git = Git.open(root.toFile())) { head = git.getRepository().resolve("HEAD").name(); }
+
+		GitResource commit = new GitResource(
+				new GitNode(GitNode.Kind.COMMIT, root.toString(), head, null, head.substring(0, 8)),
+				new GitNode(GitNode.Kind.COMMITS, root.toString(), "HEAD", null, null),
+				head.substring(0, 8), true, null, 0);
+
+		assertTrue(plugin.contextMenuItems(commit, List.of(commit)).stream()
+				.anyMatch(item -> "filepanel.view".equals(item.getActionType())));
+
+		// Verifying that opening InputStream on virtual commit entry returns commit details
+		try (var input = commit.openInputStream()) {
+			String details = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+			assertTrue(details.contains("initial"));
+			assertTrue(details.contains("Nuclr Test"));
+		}
+
+		plugin.unload();
+	}
+
+	@Test
+	void contextMenuEnablesDiscardWhenSelectionContainsWorkingChangesAndUntracked() throws Exception {
+		Path root = repository(temp.resolve("repo-discard-menu"));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+
+		GitResource modified = new GitResource(
+				new GitNode(GitNode.Kind.WORKTREE_FILE, root.toString(), null, "tracked.txt", null),
+				null, "tracked.txt", false, root.resolve("tracked.txt"), 10).marker(" M");
+
+		GitResource untracked = new GitResource(
+				new GitNode(GitNode.Kind.WORKTREE_FILE, root.toString(), null, "untracked.txt", null),
+				null, "untracked.txt", false, root.resolve("untracked.txt"), 10).marker("??");
+
+		var items = plugin.contextMenuItems(modified, List.of(modified, untracked));
+		var discardItem = items.stream().filter(item -> "git.discard".equals(item.getActionType())).findFirst().orElseThrow();
+		assertTrue(discardItem.isEnabled(), "Discard should be enabled when selection includes working changes alongside untracked files");
+
+		plugin.unload();
+	}
+
 	private static Path repository(Path root) throws Exception {
 		Files.createDirectories(root);
 		try (Git git = Git.init().setDirectory(root.toFile()).call()) {

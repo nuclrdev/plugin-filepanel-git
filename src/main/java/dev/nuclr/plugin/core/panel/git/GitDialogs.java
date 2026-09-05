@@ -67,6 +67,9 @@ final class GitDialogs {
 
 	static void showText(String title, String content) {
 		if (GraphicsEnvironment.isHeadless()) return;
+		var bounds = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+		int width = Math.min(1000, bounds.width * 3 / 4);
+		int height = Math.min(700, bounds.height * 3 / 4);
 		SwingUtilities.invokeLater(() -> {
 			JTextArea text = new JTextArea(content == null || content.isBlank() ? "No output." : content);
 			text.setEditable(false);
@@ -74,7 +77,7 @@ final class GitDialogs {
 			text.setFont(new Font(Font.MONOSPACED, Font.PLAIN,
 					UIManager.getFont("TextArea.font") != null ? UIManager.getFont("TextArea.font").getSize() : 12));
 			JScrollPane scroll = new JScrollPane(text);
-			scroll.setPreferredSize(new Dimension(1000, 700));
+			scroll.setPreferredSize(new Dimension(width, height));
 			JOptionPane.showMessageDialog(null, scroll, title, JOptionPane.PLAIN_MESSAGE);
 		});
 	}

@@ -4,3 +4,6 @@
 c.bat
 deploy.bat
 /target
+/dev
+opencode.json
+.factorypath

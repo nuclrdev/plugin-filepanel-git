@@ -35,6 +35,13 @@ final class NativeGitRunner {
 		int exitCode() { return exitCode; }
 	}
 
+	/** Raised when the user (or shutdown) aborted a running Git command. */
+	static final class CancelledException extends IOException {
+		private static final long serialVersionUID = 1L;
+
+		CancelledException() { super("Git operation cancelled."); }
+	}
+
 	boolean available() {
 		try {
 			return run(null, () -> false, "--version").succeeded();
@@ -66,15 +73,27 @@ final class NativeGitRunner {
 			while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
 				if (Thread.currentThread().isInterrupted() || cancelled != null && cancelled.getAsBoolean()) {
 					terminate(process);
-					throw new IOException("Git operation cancelled.");
+					throw new CancelledException();
 				}
 			}
-			reader.join();
-			return new Result(process.exitValue(), output.toString(StandardCharsets.UTF_8));
+			// A child process inheriting stdout (hook, credential helper) can keep the
+			// pipe open after git exits; never block the caller forever on that.
+			reader.join(TimeUnit.SECONDS.toMillis(2));
+			if (reader.isAlive()) {
+				try {
+					process.getInputStream().close();
+				} catch (IOException ignored) {
+					// The reader is already being abandoned; return the collected output.
+				}
+				reader.join(100);
+			}
+			synchronized (output) {
+				return new Result(process.exitValue(), output.toString(StandardCharsets.UTF_8));
+			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 			terminate(process);
-			throw new IOException("Git operation cancelled.", e);
+			throw new CancelledException();
 		}
 	}
 
@@ -88,8 +107,12 @@ final class NativeGitRunner {
 		byte[] buffer = new byte[8192];
 		try (input) {
 			for (int count; (count = input.read(buffer)) >= 0;) {
-				if (count == 0 || output.size() >= MAX_OUTPUT) continue;
-				output.write(buffer, 0, Math.min(count, MAX_OUTPUT - output.size()));
+				if (count == 0) continue;
+				synchronized (output) {
+					if (output.size() < MAX_OUTPUT) {
+						output.write(buffer, 0, Math.min(count, MAX_OUTPUT - output.size()));
+					}
+				}
 			}
 		} catch (IOException ignored) {
 			// Process termination closes the stream; the caller reports cancellation.

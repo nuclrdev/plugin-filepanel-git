@@ -47,7 +47,7 @@ final class GitRepositoryService {
 	record RefInfo(String name, String fullName, String revision) {}
 	record CommitInfo(String id, String shortId, String subject, String author, Instant instant, int parentCount) {}
 	record TreeEntry(String name, String path, String objectId, boolean directory, boolean symlink,
-			boolean gitlink, long size) {}
+			boolean gitlink, boolean executable, long size) {}
 
 	Path findRepository(Path candidate) throws IOException {
 		if (candidate == null) return null;
@@ -150,11 +150,12 @@ final class GitRepositoryService {
 					boolean directory = FileMode.TREE.equals(mode);
 					boolean symlink = FileMode.SYMLINK.equals(mode);
 					boolean gitlink = FileMode.GITLINK.equals(mode);
+					boolean executable = FileMode.EXECUTABLE_FILE.equals(mode);
 					ObjectId objectId = walk.getObjectId(0);
 					long size = directory || gitlink ? 0L : repository.open(objectId).getSize();
 					String childPath = path.isEmpty() ? walk.getNameString() : path + "/" + walk.getNameString();
 					entries.add(new TreeEntry(walk.getNameString(), childPath, objectId.name(), directory,
-							symlink, gitlink, size));
+							symlink, gitlink, executable, size));
 				}
 			}
 			entries.sort(Comparator.comparing(TreeEntry::directory).reversed()

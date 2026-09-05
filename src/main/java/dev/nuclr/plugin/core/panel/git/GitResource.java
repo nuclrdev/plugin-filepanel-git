@@ -41,7 +41,7 @@ final class GitResource extends NuclrResource {
 		this.name = name;
 		this.folder = folder;
 		this.length = Math.max(0L, size);
-		this.uuid = "git://" + Integer.toUnsignedString(node.identity().hashCode(), 16) + "/" + node.identity();
+		this.uuid = "git://" + node.identity();
 		this.fullPath = displayPath(node);
 		metadata.put(META_KIND, node.kind().name());
 		metadata.put(META_REPOSITORY, node.repository());
@@ -69,6 +69,11 @@ final class GitResource extends NuclrResource {
 		return this;
 	}
 
+	GitResource link(boolean link) {
+		setLink(link);
+		return this;
+	}
+
 	GitResource details(String author, Instant instant, String message) {
 		metadata.put("Author", author == null ? "" : author);
 		metadata.put("Date", instant == null ? "" : instant.toString());
@@ -84,6 +89,11 @@ final class GitResource extends NuclrResource {
 
 	@Override
 	public InputStream openInputStream(OpenOption... options) throws Exception {
+		if ((node.kind() == GitNode.Kind.COMMIT || node.kind() == GitNode.Kind.REF || node.kind() == GitNode.Kind.STASH)
+				&& !node.repository().isBlank() && !node.revision().isBlank()) {
+			String details = new GitRepositoryService().commitDetails(Path.of(node.repository()), node.revision());
+			return new ByteArrayInputStream(details.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		}
 		if (folder) throw new IOException("Cannot read a Git directory.");
 		if (node.kind() == GitNode.Kind.WORKTREE_FILE && path != null) {
 			return Files.newInputStream(path, options);

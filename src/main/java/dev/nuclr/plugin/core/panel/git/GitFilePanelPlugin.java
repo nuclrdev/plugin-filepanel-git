@@ -10,10 +10,13 @@ import java.io.OutputStream;
 import java.awt.GraphicsEnvironment;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -30,6 +33,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import javax.swing.SwingUtilities;
 
@@ -226,23 +230,34 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		Path root = repository(folder.node());
 		String relative = folder.node().relativePath();
 		Path directory = safeResolve(root, relative);
-		if (!Files.isDirectory(directory)) throw new IOException("Working-tree folder no longer exists: " + directory);
+		if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+			throw new IOException("Working-tree folder no longer exists: " + directory);
+		}
 		GitStatusSnapshot snapshot = refreshStatus(root);
 		var entries = new ArrayList<NuclrResource>();
 		try (var stream = Files.list(directory)) {
 			var children = stream.filter(path -> !".git".equals(path.getFileName().toString()))
-					.sorted(Comparator.comparing((Path path) -> !Files.isDirectory(path))
+					.sorted(Comparator.comparing((Path path) -> !isDirectoryNoFollow(path))
 							.thenComparing(path -> path.getFileName().toString(), String.CASE_INSENSITIVE_ORDER))
 					.toList();
 			for (Path child : children) {
 				if (cancelled(cancelled)) break;
-				boolean directoryChild = Files.isDirectory(child);
+				BasicFileAttributes attributes;
+				try {
+					attributes = Files.readAttributes(child, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+				} catch (IOException unreadable) {
+					// A single unreadable entry must not fail the whole listing.
+					LOG.debug("Skipping unreadable work-tree entry {}", child, unreadable);
+					continue;
+				}
+				boolean directoryChild = attributes.isDirectory();
 				String childRelative = relative.isEmpty() ? child.getFileName().toString()
 						: relative + "/" + child.getFileName();
 				GitNode.Kind kind = directoryChild ? GitNode.Kind.WORKTREE_DIRECTORY : GitNode.Kind.WORKTREE_FILE;
 				GitResource entry = resource(new GitNode(kind, root.toString(), null, childRelative, null),
 						folder.node(), child.getFileName().toString(), directoryChild, child, safeSize(child));
 				entry.marker(snapshot.marker(childRelative, directoryChild));
+				entry.setLink(attributes.isSymbolicLink());
 				entry.setHidden(entry.getName().startsWith("."));
 				entries.add(entry);
 			}
@@ -282,9 +297,10 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		for (GitStatusSnapshot.Entry state : selected) {
 			if (cancelled(cancelled)) break;
 			Path local = safeResolve(root, state.path());
-			Path existing = Files.exists(local) && !Files.isDirectory(local) ? local : null;
+			Path existing = Files.exists(local, LinkOption.NOFOLLOW_LINKS) && !isDirectoryNoFollow(local) ? local : null;
 			GitResource entry = resource(new GitNode(GitNode.Kind.STATUS_FILE, root.toString(), null,
 					state.path(), state.marker()), folder.node(), state.path(), false, existing, safeSize(local));
+			entry.setLink(existing != null && Files.isSymbolicLink(existing));
 			entries.add(entry.marker(state.marker()));
 		}
 		currentFolder = folder;
@@ -360,8 +376,9 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			String value = tree.directory() ? revisionOrigin(folder.node()) : tree.objectId();
 			GitNode node = new GitNode(kind, root.toString(), revision, tree.path(), value);
 			GitResource entry = resource(node, folder.node(), tree.name(), tree.directory(), null, tree.size());
-			if (tree.symlink()) entry.column("Git", "link");
+			if (tree.symlink()) entry.link(true).column("Git", "link");
 			if (tree.gitlink()) entry.column("Git", "submodule");
+			if (tree.executable()) entry.column("git.executable", true);
 			entries.add(entry);
 		}
 		currentFolder = folder;
@@ -371,7 +388,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	@Override
 	public List<NuclrMenuResource> menuItems(NuclrResource source) {
 		var items = new ArrayList<NuclrMenuResource>();
-		if (source != null && !source.isFolder()) items.add(menu("View", "F3", VIEW));
+		if (source instanceof GitResource resource && canView(resource)) items.add(menu("View", "F3", VIEW));
 		items.add(menu("Copy", "F5", COPY));
 		items.add(menu("Commit", "F2", COMMIT));
 		items.add(menu("Diff", "Shift+F3", DIFF));
@@ -390,19 +407,21 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			List<NuclrResource> selectedResources) {
 		GitResource resource = focusedResource instanceof GitResource git ? git : null;
 		var items = new ArrayList<NuclrContextMenuItem>();
+		List<GitResource> selection = chosen(selectedResources, resource);
+		boolean selectionHasWorkingPath = selection.stream().anyMatch(GitFilePanelPlugin::hasWorkingPath);
+		boolean selectionHasStagedChange = selection.stream().anyMatch(GitFilePanelPlugin::hasStagedChange);
+		boolean selectionHasWorkingChange = selection.stream().anyMatch(GitFilePanelPlugin::hasWorkingChange);
+		boolean selectionHasUntracked = selection.stream().anyMatch(GitFilePanelPlugin::isUntracked);
+		if (resource != null && canView(resource)) items.add(action("View", VIEW, "view", true, false));
 		if (resource != null && !resource.isFolder()) {
-			String marker = resource.getMetadata("Git", "");
-			boolean stagedChange = marker.length() >= 1 && marker.charAt(0) != ' ' && marker.charAt(0) != '?';
-			boolean workingChange = "UU".equals(marker)
-					|| marker.length() >= 2 && marker.charAt(1) != ' ' && marker.charAt(1) != '?';
-			boolean untracked = "??".equals(marker);
-			items.add(action("View", VIEW, "view", true, false));
+			boolean stagedChange = hasStagedChange(resource);
+			boolean workingChange = hasWorkingChange(resource);
 			items.add(action("Copy to opposite panel", COPY, "copy", true, false));
-			if (hasWorkingPath(resource)) {
+			if (selectionHasWorkingPath) {
 				items.add(NuclrContextMenuItem.separator());
-				items.add(action("Stage / Add", STAGE, "add", workingChange || untracked, false));
-				items.add(action("Unstage", UNSTAGE, "remove", stagedChange, false));
-				items.add(action("Discard working changes", DISCARD, "undo", workingChange && !untracked, true));
+				items.add(action("Stage / Add", STAGE, "add", selectionHasWorkingChange || selectionHasUntracked, false));
+				items.add(action("Unstage", UNSTAGE, "remove", selectionHasStagedChange, false));
+				items.add(action("Discard working changes", DISCARD, "undo", selectionHasWorkingChange, true));
 				items.add(action("Working diff", DIFF, "view", workingChange, false));
 				items.add(action("Staged diff", DIFF_STAGED, "view", stagedChange, false));
 				items.add(action("File history", HISTORY, "history", true, false));
@@ -443,7 +462,8 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			case COPY -> copyTo(other, chosen(selectedResources, focused), callback);
 			case REFRESH -> refresh();
 			case STAGE -> pathOperation("Stage", "add", false, chosenPaths(selectedResources, focused), callback);
-			case UNSTAGE -> pathOperation("Unstage", "restore", false, chosenPaths(selectedResources, focused), callback,
+			case UNSTAGE -> pathOperation("Unstage", "restore", false,
+					chosenPaths(selectedResources, focused, GitFilePanelPlugin::hasStagedChange), callback,
 					"--staged");
 			case DISCARD -> discard(selectedResources, focused, callback);
 			case DIFF -> showDiff(focused, false);
@@ -466,7 +486,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	}
 
 	private void view(GitResource resource) {
-		if (resource == null || resource.isFolder() || context == null) return;
+		if (resource == null || !canView(resource) || context == null) return;
 		context.getEventBus().emit(EVENT_VIEW, Map.of("resource", resource), null);
 	}
 
@@ -508,6 +528,14 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		}
 		if (!GitDialogs.confirm("Restore Version", "Replace the working-tree file "
 				+ resource.node().relativePath() + " with this version?")) return;
+		// Prefer native git: it restores permissions/modes correctly. Fall back to
+		// a pure-JGit blob write (which needs no external git) so the feature keeps
+		// working on hosts without the native executable.
+		if (isNativeGitAvailable()) {
+			runNative("Restore version", root, callback, "restore", "--source=" + resource.node().revision(),
+					"--worktree", "--", resource.node().relativePath());
+			return;
+		}
 		actions.submit(() -> {
 			try {
 				if (callback != null) callback.onStart("Restoring " + resource.getName());
@@ -588,7 +616,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	}
 
 	private void discard(List<NuclrResource> selected, GitResource focused, NuclrPluginCallback callback) {
-		List<String> paths = chosenPaths(selected, focused);
+		List<String> paths = chosenPaths(selected, focused, GitFilePanelPlugin::hasWorkingChange);
 		if (paths.isEmpty() || !GitDialogs.confirm("Discard Changes",
 				"Discard working-tree changes in " + (paths.size() == 1 ? paths.get(0) : paths.size() + " files") + "?")) return;
 		pathOperation("Discard changes", "restore", true, paths, callback, "--worktree");
@@ -612,9 +640,11 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 				}
 				if (callback != null) callback.onComplete();
 				requestRefresh(uuid);
+			} catch (NativeGitRunner.CancelledException cancelled) {
+				if (callback != null) callback.onError(title, cancelled);
 			} catch (IOException e) {
 				if (callback != null) callback.onError(title, e);
-				if (!unloading && !e.getMessage().toLowerCase(Locale.ROOT).contains("cancel")) GitDialogs.error(title, e.getMessage());
+				if (!unloading) GitDialogs.error(title, e.getMessage());
 			}
 		});
 	}
@@ -628,20 +658,36 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			return;
 		}
 		Path targetRoot = destination.toAbsolutePath().normalize();
+		// Ask once up front instead of interrupting the copy loop with a modal
+		// dialog per file (a blocking dialog on this worker thread can deadlock).
+		if (anyTargetExists(sources, targetRoot)
+				&& !GitDialogs.confirm("Copy", "Some files already exist in the target folder. Replace them?")) return;
 		actions.submit(() -> {
 			try {
 				if (callback != null) callback.onStart("Copying from Git");
 				for (GitResource source : sources) {
-					if (unloading || callback != null && callback.isCancelled()) throw new IOException("Copy cancelled.");
+					if (unloading || callback != null && callback.isCancelled()) throw new NativeGitRunner.CancelledException();
 					copyResource(source, targetRoot, callback);
 				}
 				if (callback != null) callback.onComplete();
 				requestRefresh(other.uuid());
+			} catch (NativeGitRunner.CancelledException cancelled) {
+				if (callback != null) callback.onError("Copy from Git", cancelled);
 			} catch (IOException e) {
 				if (callback != null) callback.onError("Copy from Git", e);
-				if (!e.getMessage().toLowerCase(Locale.ROOT).contains("cancel")) GitDialogs.error("Copy", e.getMessage());
+				GitDialogs.error("Copy", e.getMessage());
 			}
 		});
+	}
+
+	private static boolean anyTargetExists(List<GitResource> sources, Path targetRoot) {
+		for (GitResource source : sources) {
+			String name = source.getName();
+			if (name == null || name.isBlank() || "..".equals(name)) continue;
+			Path target = targetRoot.resolve(name).normalize();
+			if (target.startsWith(targetRoot) && Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return true;
+		}
+		return false;
 	}
 
 	private void copyResource(GitResource source, Path destination, NuclrPluginCallback callback) throws IOException {
@@ -650,73 +696,153 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		Path target = destination.resolve(name).normalize();
 		if (!target.startsWith(destination)) throw new IOException("Unsafe Git path: " + name);
 		if (source.node().kind() == GitNode.Kind.WORKTREE_FILE) {
-			copyLocal(Path.of(source.node().repository()).resolve(source.node().relativePath()), target);
+			copyLocal(safeResolve(Path.of(source.node().repository()), source.node().relativePath()), target, destination);
 			return;
 		}
 		if (source.node().kind() == GitNode.Kind.STATUS_FILE) {
 			Path working = safeResolve(Path.of(source.node().repository()), source.node().relativePath());
-			if (!Files.isRegularFile(working)) throw new IOException("The working-tree file does not exist: " + source.node().relativePath());
-			copyLocal(working, target);
+			if (!Files.exists(working, LinkOption.NOFOLLOW_LINKS)) {
+				throw new IOException("The working-tree file does not exist: " + source.node().relativePath());
+			}
+			copyLocal(working, target, destination);
 			return;
 		}
 		if (source.node().kind() == GitNode.Kind.WORKTREE_DIRECTORY) {
-			copyLocal(Path.of(source.node().repository()).resolve(source.node().relativePath()), target);
+			copyLocal(safeResolve(Path.of(source.node().repository()), source.node().relativePath()), target, destination);
 			return;
 		}
 		if (source.node().kind() == GitNode.Kind.REVISION_BLOB) {
 			if ("submodule".equals(source.getMetadata("Git", ""))) {
 				throw new IOException("Submodule entries cannot be copied without the submodule repository.");
 			}
-			writeHistorical(source, target);
+			writeHistorical(source, target, destination);
 			return;
 		}
 		if (source.node().kind() == GitNode.Kind.REVISION_TREE) {
-			copyHistoricalTree(source, target, callback);
+			copyHistoricalTree(source, target, destination, callback);
 			return;
 		}
 		throw new IOException("This Git node cannot be copied: " + source.getName());
 	}
 
-	private void writeHistorical(GitResource source, Path target) throws IOException {
-		if (Files.exists(target) && !GitDialogs.confirm("Replace File", "Replace " + target.getFileName() + "?")) return;
-		Files.createDirectories(target.getParent());
+	private void writeHistorical(GitResource source, Path target, Path safeRoot) throws IOException {
+		// Replacement conflicts are confirmed once for the whole batch in copyTo().
+		if (source.isLink()) {
+			String linkTarget = new String(repositories.blob(Path.of(source.node().repository()), source.node().value()),
+					java.nio.charset.StandardCharsets.UTF_8);
+			try {
+				Path link = Path.of(linkTarget);
+				prepareTarget(target, safeRoot);
+				createSymbolicLink(target, link);
+			} catch (java.nio.file.InvalidPathException e) {
+				throw new IOException("Historical symbolic link has an invalid target.", e);
+			}
+			return;
+		}
+		prepareTarget(target, safeRoot);
 		try (InputStream input = repositories.openBlob(Path.of(source.node().repository()), source.node().value());
 				OutputStream output = Files.newOutputStream(target)) {
 			input.transferTo(output);
 		}
+		applyExecutable(source, target);
 	}
 
-	private void copyHistoricalTree(GitResource source, Path target, NuclrPluginCallback callback) throws IOException {
-		Files.createDirectories(target);
+	private void copyHistoricalTree(GitResource source, Path target, Path safeRoot,
+			NuclrPluginCallback callback) throws IOException {
+		prepareDirectory(target, safeRoot);
 		for (GitRepositoryService.TreeEntry entry : repositories.tree(Path.of(source.node().repository()),
 				source.node().revision(), source.node().relativePath())) {
-			if (unloading || callback != null && callback.isCancelled()) throw new IOException("Copy cancelled.");
+			if (unloading || callback != null && callback.isCancelled()) throw new NativeGitRunner.CancelledException();
+			if (entry.gitlink()) throw new IOException("Submodule entries cannot be copied without the submodule repository.");
 			GitNode.Kind kind = entry.directory() ? GitNode.Kind.REVISION_TREE : GitNode.Kind.REVISION_BLOB;
 			String value = entry.directory() ? source.node().value() : entry.objectId();
 			GitResource child = resource(new GitNode(kind, source.node().repository(), source.node().revision(),
 					entry.path(), value), source.node(), entry.name(), entry.directory(), null, entry.size());
-			if (entry.gitlink()) child.column("Git", "submodule");
-			if (entry.directory()) copyHistoricalTree(child, target.resolve(entry.name()), callback);
-			else writeHistorical(child, target.resolve(entry.name()));
+			if (entry.symlink()) child.link(true).column("Git", "link");
+			if (entry.executable()) child.column("git.executable", true);
+			if (entry.directory()) copyHistoricalTree(child, target.resolve(entry.name()), safeRoot, callback);
+			else writeHistorical(child, target.resolve(entry.name()), safeRoot);
 		}
 	}
 
-	private static void copyLocal(Path source, Path target) throws IOException {
-		if (Files.isDirectory(source)) {
+	private static void copyLocal(Path source, Path target, Path safeRoot) throws IOException {
+		BasicFileAttributes attributes = Files.readAttributes(source, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+		if (attributes.isSymbolicLink()) {
+			prepareTarget(target, safeRoot);
+			createSymbolicLink(target, Files.readSymbolicLink(source));
+		} else if (attributes.isDirectory()) {
 			Files.walkFileTree(source, new SimpleFileVisitor<>() {
 				@Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-					Files.createDirectories(target.resolve(source.relativize(dir).toString()));
+					prepareDirectory(target.resolve(source.relativize(dir).toString()), safeRoot);
 					return FileVisitResult.CONTINUE;
 				}
 				@Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
 					Path destination = target.resolve(source.relativize(file).toString());
-					Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING);
+					copyLocal(file, destination, safeRoot);
 					return FileVisitResult.CONTINUE;
 				}
 			});
 		} else {
-			Files.createDirectories(target.getParent());
-			Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+			prepareTarget(target, safeRoot);
+			Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+		}
+	}
+
+	private static void prepareTarget(Path target, Path safeRoot) throws IOException {
+		prepareDirectoryParents(target.getParent(), safeRoot);
+		if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) Files.delete(target);
+	}
+
+	private static void createSymbolicLink(Path target, Path linkTarget) throws IOException {
+		try {
+			Files.createSymbolicLink(target, linkTarget);
+		} catch (UnsupportedOperationException | SecurityException e) {
+			throw new IOException("Symbolic links are not supported at the copy destination.", e);
+		}
+	}
+
+	private static void applyExecutable(GitResource source, Path target) throws IOException {
+		if (!Boolean.TRUE.equals(source.getMetadata("git.executable", Boolean.FALSE))) return;
+		PosixFileAttributeView view = Files.getFileAttributeView(target, PosixFileAttributeView.class,
+				LinkOption.NOFOLLOW_LINKS);
+		if (view != null) {
+			var permissions = new java.util.HashSet<>(view.readAttributes().permissions());
+			permissions.add(PosixFilePermission.OWNER_EXECUTE);
+			permissions.add(PosixFilePermission.GROUP_EXECUTE);
+			permissions.add(PosixFilePermission.OTHERS_EXECUTE);
+			view.setPermissions(permissions);
+		} else {
+			target.toFile().setExecutable(true, false);
+		}
+	}
+
+	private static void prepareDirectory(Path target, Path safeRoot) throws IOException {
+		if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+			BasicFileAttributes attributes = Files.readAttributes(target, BasicFileAttributes.class,
+					LinkOption.NOFOLLOW_LINKS);
+			if (!attributes.isDirectory() || attributes.isSymbolicLink()) Files.delete(target);
+		}
+		prepareDirectoryParents(target, safeRoot);
+	}
+
+	private static void prepareDirectoryParents(Path directory, Path safeRoot) throws IOException {
+		Path root = safeRoot.toAbsolutePath().normalize();
+		Path target = directory.toAbsolutePath().normalize();
+		if (!target.startsWith(root)) throw new IOException("Unsafe copy destination: " + target);
+		if (target.equals(root)) return;
+		Path current = root;
+		for (Path part : root.relativize(target)) {
+			if (part.toString().isEmpty()) continue;
+			current = current.resolve(part);
+			if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
+				BasicFileAttributes attributes = Files.readAttributes(current, BasicFileAttributes.class,
+						LinkOption.NOFOLLOW_LINKS);
+				if (attributes.isSymbolicLink() || !attributes.isDirectory()) {
+					throw new IOException("Copy destination contains a symbolic link or non-directory: " + current);
+				}
+			} else {
+				Files.createDirectory(current);
+			}
 		}
 	}
 
@@ -798,8 +924,18 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		else SwingUtilities.invokeLater(emit);
 	}
 
-	private boolean nativeAvailable() {
+	private boolean isNativeGitAvailable() {
+		if (nativeGitAvailable == null) {
+			nativeGitAvailable = nativeGit.available();
+		}
 		return Boolean.TRUE.equals(nativeGitAvailable);
+	}
+
+	private boolean nativeAvailable() {
+		// Optimistic while the background probe is still running: runNative()
+		// re-checks and reports a clear error if git is genuinely unavailable.
+		Boolean available = nativeGitAvailable;
+		return available == null || available;
 	}
 
 	private NuclrResourceData withParent(GitResource folder, List<String> columns, List<? extends NuclrResource> entries) {
@@ -875,10 +1011,12 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	}
 
 	private void rememberRepository(Path root) {
+		NuclrPluginContext pluginContext = context;
+		if (pluginContext == null) return; // plugin is unloading
 		var paths = new LinkedHashSet<String>();
 		paths.add(root.toString());
 		for (Path recent : recentRepositories()) paths.add(recent.toString());
-		context.getSettings().set(PLUGIN_ID, SETTINGS_RECENT, paths.stream().limit(MAX_RECENT).toList());
+		pluginContext.getSettings().set(PLUGIN_ID, SETTINGS_RECENT, paths.stream().limit(MAX_RECENT).toList());
 	}
 
 	private Path lastRepositoryParent() {
@@ -899,6 +1037,38 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 				|| resource.node().kind() == GitNode.Kind.STATUS_FILE);
 	}
 
+	private static boolean hasStagedChange(GitResource resource) {
+		String marker = resource == null ? "" : resource.getMetadata("Git", "");
+		return marker.length() >= 1 && marker.charAt(0) != ' ' && marker.charAt(0) != '?';
+	}
+
+	private static boolean hasWorkingChange(GitResource resource) {
+		String marker = resource == null ? "" : resource.getMetadata("Git", "");
+		return "UU".equals(marker)
+				|| marker.length() >= 2 && marker.charAt(1) != ' ' && marker.charAt(1) != '?';
+	}
+
+	private static boolean isUntracked(GitResource resource) {
+		return resource != null && "??".equals(resource.getMetadata("Git", ""));
+	}
+
+	private static boolean canView(GitResource resource) {
+		if (resource == null) return false;
+		if (!resource.isFolder()) return true;
+		return switch (resource.node().kind()) {
+			case COMMIT, REF, STASH -> true;
+			default -> false;
+		};
+	}
+
+	private static boolean isDirectoryNoFollow(Path path) {
+		try {
+			return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory();
+		} catch (IOException e) {
+			return false;
+		}
+	}
+
 	private static String relativePath(GitResource resource) {
 		return resource == null || resource.node().relativePath().isBlank() ? null : resource.node().relativePath();
 	}
@@ -911,19 +1081,31 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	}
 
 	private static List<String> chosenPaths(List<NuclrResource> selected, GitResource focused) {
-		return chosen(selected, focused).stream().map(GitFilePanelPlugin::relativePath)
+		return chosenPaths(selected, focused, resource -> true);
+	}
+
+	private static List<String> chosenPaths(List<NuclrResource> selected, GitResource focused,
+			Predicate<GitResource> filter) {
+		return chosen(selected, focused).stream()
+				.filter(filter)
+				.map(GitFilePanelPlugin::relativePath)
 				.filter(path -> path != null && !path.isBlank()).distinct().toList();
 	}
 
 	private static Path safeResolve(Path root, String relative) throws IOException {
+		if (relative == null || relative.isBlank()) return root.toAbsolutePath().normalize();
 		Path resolved = root.resolve(relative.replace('/', java.io.File.separatorChar)).normalize();
-		if (!resolved.startsWith(root.normalize())) throw new IOException("Unsafe repository path: " + relative);
+		if (!resolved.startsWith(root.toAbsolutePath().normalize())) throw new IOException("Unsafe repository path: " + relative);
 		return resolved;
 	}
 
 	private static long safeSize(Path path) {
-		try { return path != null && Files.isRegularFile(path) ? Files.size(path) : 0L; }
-		catch (IOException e) { return 0L; }
+		if (path == null) return 0L;
+		try {
+			// Follows links so symlinked files report their real size (a NOFOLLOW read
+			// would report 0 for every symlink in the listing).
+			return Files.isRegularFile(path) ? Files.size(path) : 0L;
+		} catch (IOException e) { return 0L; }
 	}
 
 	private static boolean cancelled(AtomicBoolean flag) {
