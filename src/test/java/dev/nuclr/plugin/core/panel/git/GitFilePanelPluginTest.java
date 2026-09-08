@@ -215,6 +215,7 @@ class GitFilePanelPluginTest {
 			@Override public void unsubscribe(NuclrEventListener listener) { }
 		};
 		@Override public NuclrEventBus getEventBus() { return events; }
+		@Override public dev.nuclr.platform.NuclrCredentialStore getCredentialStore() { throw new UnsupportedOperationException(); }
 		@Override public NuclrThemeScheme getTheme() { return new NuclrThemeScheme("Test", Map.of()); }
 		@Override public NuclrSettings getSettings() { return settings; }
 		@Override public Locale getLocale() { return Locale.ROOT; }
