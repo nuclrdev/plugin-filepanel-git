@@ -10,7 +10,8 @@
 	<name>Nuclr File Panel - GIT</name>
 
 	<properties>
-		<platform.sdk.version>5.0.0</platform.sdk.version>
+		<platform.sdk.version>6.1.0</platform.sdk.version>
+		<platform.sdk.min.version>5.0.0</platform.sdk.min.version>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<maven.compiler.release>25</maven.compiler.release>
 	</properties>
