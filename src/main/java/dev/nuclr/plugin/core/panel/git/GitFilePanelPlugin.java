@@ -80,6 +80,11 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private static final String STASH_CREATE = "git.stash.create";
 	private static final String STASH_APPLY = "git.stash.apply";
 	private static final String STASH_DROP = "git.stash.drop";
+	private static final String REMOVE_RECENT = "git.recent.remove";
+	/** Actions that need a working tree, refused for bare repositories and remote mirrors. */
+	private static final Set<String> WORKTREE_ACTIONS = Set.of(STAGE, UNSTAGE, DISCARD, DIFF, DIFF_STAGED,
+			COMPARE_WORKTREE, RESTORE_VERSION, COMMIT, CREATE_BRANCH, CHECKOUT, PULL, STASH_CREATE, STASH_APPLY,
+			STASH_DROP);
 	private static final String EVENT_VIEW = "mainpanel.view";
 	private static final String EVENT_REFRESH = "refresh.plugin.file.panel";
 
@@ -90,6 +95,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private final String uuid = UUID.randomUUID().toString();
 	private final GitRepositoryService repositories = new GitRepositoryService();
 	private final NativeGitRunner nativeGit = new NativeGitRunner();
+	private final RemoteMirrors mirrors;
 	private final Map<String, CachedStatus> statusCache = new ConcurrentHashMap<>();
 	private final Map<String, GitRepositoryService.RepositoryInfo> infoCache = new ConcurrentHashMap<>();
 	private final ExecutorService actions = Executors.newSingleThreadExecutor(
@@ -100,6 +106,14 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private volatile boolean focused;
 	private volatile boolean unloading;
 	private volatile Boolean nativeGitAvailable;
+
+	public GitFilePanelPlugin() {
+		this(RemoteMirrors.defaultCacheRoot());
+	}
+
+	GitFilePanelPlugin(Path mirrorCache) {
+		this.mirrors = new RemoteMirrors(mirrorCache, nativeGit);
+	}
 
 	@Override
 	public void preinit(NuclrPluginContext context) {
@@ -156,6 +170,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			return switch (selected.node().kind()) {
 				case ROOT -> listRoot(selected);
 				case OPEN_REPOSITORY -> openRepository(selected, cancelled);
+				case OPEN_REMOTE -> openRemote(selected, cancelled);
 				case REPOSITORY -> listRepository(selected);
 				case WORKTREE, WORKTREE_DIRECTORY -> listWorkingTree(selected, cancelled);
 				case STATUS -> listStatus(selected, cancelled);
@@ -180,12 +195,14 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private NuclrResourceData listRoot(GitResource folder) {
 		var entries = new ArrayList<NuclrResource>();
 		entries.add(resource(GitNode.openRepository(), GitNode.root(), "Open Repository…", true, null, 0));
+		entries.add(resource(GitNode.openRemote(), GitNode.root(), "Open Remote URL…", true, null, 0));
 		for (Path recent : recentRepositories()) {
 			try {
 				GitRepositoryService.RepositoryInfo info = repositories.info(recent);
 				infoCache.put(info.root().toString(), info);
 				entries.add(resource(GitNode.repository(info.root().toString()), GitNode.root(),
-						repositoryName(info.root()) + "  [" + info.branch() + "]", true, null, 0));
+						displayName(info.root()) + "  [" + info.branch() + "]", true, null, 0)
+						.marker(mirrors.isMirror(info.root()) ? "remote" : ""));
 			} catch (IOException ignored) {
 				// Stale entries remain in settings but are omitted until opened again.
 			}
@@ -201,6 +218,21 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		if (root == null) throw new IOException("No Git repository was found at or above " + chosen);
 		rememberRepository(root);
 		return listRepository(resource(GitNode.repository(root.toString()), GitNode.root(), repositoryName(root), true, null, 0));
+	}
+
+	private NuclrResourceData openRemote(GitResource selected, AtomicBoolean cancelled) throws IOException {
+		String url = GitDialogs.input("Open Remote Repository",
+				"Repository URL (HTTPS or SSH). A local mirror is cloned on first open:", "");
+		if (url == null || cancelled(cancelled)) return listRoot(resource(GitNode.root(), null, "Git", true, null, 0));
+		if (!isNativeGitAvailable()) {
+			throw new IOException("The native git executable is required to open a remote repository.");
+		}
+		Path mirror = mirrors.open(url, () -> unloading || cancelled(cancelled));
+		Path root = repositories.findRepository(mirror);
+		if (root == null) throw new IOException("The mirror of " + url + " is not a readable Git repository.");
+		infoCache.put(root.toString(), repositories.info(root));
+		rememberRepository(root);
+		return listRepository(resource(GitNode.repository(root.toString()), GitNode.root(), displayName(root), true, null, 0));
 	}
 
 	private NuclrResourceData listRepository(GitResource folder) throws IOException {
@@ -390,10 +422,12 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		var items = new ArrayList<NuclrMenuResource>();
 		if (source instanceof GitResource resource && canView(resource)) items.add(menu("View", "F3", VIEW));
 		items.add(menu("Copy", "F5", COPY));
-		items.add(menu("Commit", "F2", COMMIT));
-		items.add(menu("Diff", "Shift+F3", DIFF));
-		items.add(menu("Stage", "Shift+F5", STAGE));
-		items.add(menu("Unstage", "Shift+F6", UNSTAGE));
+		if (!isBare(repositoryOf(currentFolder))) {
+			items.add(menu("Commit", "F2", COMMIT));
+			items.add(menu("Diff", "Shift+F3", DIFF));
+			items.add(menu("Stage", "Shift+F5", STAGE));
+			items.add(menu("Unstage", "Shift+F6", UNSTAGE));
+		}
 		items.add(menu("Name", "Ctrl+F3", "filepanel.sort:name:Name"));
 		items.add(menu("Date", "Ctrl+F5", "filepanel.sort:modified:Date"));
 		items.add(menu("Size", "Ctrl+F6", "filepanel.sort:size:Size"));
@@ -412,6 +446,8 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		boolean selectionHasStagedChange = selection.stream().anyMatch(GitFilePanelPlugin::hasStagedChange);
 		boolean selectionHasWorkingChange = selection.stream().anyMatch(GitFilePanelPlugin::hasWorkingChange);
 		boolean selectionHasUntracked = selection.stream().anyMatch(GitFilePanelPlugin::isUntracked);
+		Path root = repositoryOf(resource);
+		boolean bare = isBare(root);
 		if (resource != null && canView(resource)) items.add(action("View", VIEW, "view", true, false));
 		if (resource != null && !resource.isFolder()) {
 			boolean stagedChange = hasStagedChange(resource);
@@ -427,21 +463,32 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 				items.add(action("File history", HISTORY, "history", true, false));
 				items.add(action("Blame", BLAME, "info", true, false));
 			}
-			if (resource.node().kind() == GitNode.Kind.REVISION_BLOB
+			if (!bare && resource.node().kind() == GitNode.Kind.REVISION_BLOB
 					&& !"submodule".equals(resource.getMetadata("Git", ""))) {
 				items.add(NuclrContextMenuItem.separator());
 				items.add(action("Compare with working tree", COMPARE_WORKTREE, "view", true, false));
 				items.add(action("Restore this version", RESTORE_VERSION, "undo", true, true));
 			}
 		}
-		if (resource != null && resource.node().kind() == GitNode.Kind.REF) {
+		if (!bare && resource != null && resource.node().kind() == GitNode.Kind.REF) {
 			items.add(action("Checkout branch", CHECKOUT, "refresh", true, false));
 		}
-		if (resource != null && resource.node().kind() == GitNode.Kind.STASH) {
+		if (!bare && resource != null && resource.node().kind() == GitNode.Kind.STASH) {
 			items.add(action("Apply stash", STASH_APPLY, "undo", true, false));
 			items.add(action("Drop stash", STASH_DROP, "delete", true, true));
 		}
-		if (repositoryOf(resource) != null) {
+		if (resource != null && resource.node().kind() == GitNode.Kind.REPOSITORY && !"..".equals(resource.getName())) {
+			boolean mirror = mirrors.isMirror(root);
+			items.add(action(mirror ? "Remove and delete local mirror" : "Remove from list",
+					REMOVE_RECENT, "delete", true, mirror));
+		}
+		if (root != null && bare) {
+			if (!items.isEmpty()) items.add(NuclrContextMenuItem.separator());
+			items.add(action("Fetch all", FETCH, "refresh", nativeAvailable(), false));
+			// Pushing from a mirror forces the remote to match it, deleting refs
+			// created there since the last fetch.
+			if (!mirrors.isMirror(root)) items.add(action("Push", PUSH, "upload", nativeAvailable(), false));
+		} else if (root != null) {
 			if (!items.isEmpty()) items.add(NuclrContextMenuItem.separator());
 			items.add(action("Commit staged changes", COMMIT, "save", nativeAvailable(), false));
 			items.add(action("Create and checkout branch", CREATE_BRANCH, "add", nativeAvailable(), false));
@@ -457,6 +504,13 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
 			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 		GitResource focused = focusedResource instanceof GitResource git ? git : null;
+		Path target = repositoryOf(focused != null ? focused : currentFolder);
+		if (isBare(target) && (WORKTREE_ACTIONS.contains(actionType) || PUSH.equals(actionType) && mirrors.isMirror(target))) {
+			GitDialogs.error("Git", mirrors.isMirror(target)
+					? "This is a read-only mirror of a remote repository. Clone it locally to make changes."
+					: "This repository has no working tree.");
+			return;
+		}
 		switch (actionType) {
 			case VIEW -> view(focused);
 			case COPY -> copyTo(other, chosen(selectedResources, focused), callback);
@@ -481,6 +535,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			case STASH_CREATE -> repositoryOperation("Stash", callback, "stash", "push", "-u", "-m", "Nuclr Commander");
 			case STASH_APPLY -> stash(focused, false, callback);
 			case STASH_DROP -> stash(focused, true, callback);
+			case REMOVE_RECENT -> removeRecent(focused);
 			default -> LOG.debug("Git panel ignoring action [{}]", actionType);
 		}
 	}
@@ -550,6 +605,30 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 				if (callback != null) callback.onError("Restore version", e);
 				GitDialogs.error("Restore Version", e.getMessage());
 			}
+		});
+	}
+
+	private void removeRecent(GitResource resource) {
+		if (resource == null || resource.node().kind() != GitNode.Kind.REPOSITORY) return;
+		Path root = repository(resource.node());
+		boolean mirror = mirrors.isMirror(root);
+		if (mirror && !GitDialogs.confirm("Remove Remote Repository", "Remove " + displayName(root)
+				+ " from the list and delete its local mirror?")) return;
+		forgetRepository(root);
+		infoCache.remove(root.toString());
+		statusCache.remove(root.toString());
+		if (!mirror) {
+			requestRefresh(uuid);
+			return;
+		}
+		actions.submit(() -> {
+			try {
+				mirrors.remove(root);
+			} catch (IOException e) {
+				LOG.warn("Unable to delete mirror {}: {}", root, e.getMessage(), e);
+				if (!unloading) GitDialogs.error("Remove Remote Repository", e.getMessage());
+			}
+			requestRefresh(uuid);
 		});
 	}
 
@@ -882,7 +961,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		String area = node.kind().name().replace('_', ' ').toLowerCase(Locale.ROOT);
 		String suffix = node.relativePath().isBlank() ? "" : "/" + node.relativePath();
 		if (node.isRevisionNode()) area = "@ " + abbreviate(node.revision(), 10) + suffix;
-		return repositoryName(root) + " — " + branch + " — " + area;
+		return displayName(root) + " — " + branch + " — " + area;
 	}
 
 	@Override
@@ -961,7 +1040,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		if (node == null) return null;
 		return switch (node.kind()) {
 			case ROOT -> null;
-			case OPEN_REPOSITORY, REPOSITORY -> GitNode.root();
+			case OPEN_REPOSITORY, OPEN_REMOTE, REPOSITORY -> GitNode.root();
 			case WORKTREE, STATUS, BRANCHES, COMMITS, TAGS, STASHES -> GitNode.repository(node.repository());
 			case WORKTREE_DIRECTORY -> {
 				String parent = parentPath(node.relativePath());
@@ -1019,9 +1098,31 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		pluginContext.getSettings().set(PLUGIN_ID, SETTINGS_RECENT, paths.stream().limit(MAX_RECENT).toList());
 	}
 
+	private void forgetRepository(Path root) {
+		NuclrPluginContext pluginContext = context;
+		if (pluginContext == null) return;
+		String key = root.toString();
+		pluginContext.getSettings().set(PLUGIN_ID, SETTINGS_RECENT, recentRepositories().stream()
+				.map(Path::toString).filter(path -> !path.equals(key)).toList());
+	}
+
 	private Path lastRepositoryParent() {
-		List<Path> recent = recentRepositories();
-		return recent.isEmpty() ? Path.of(System.getProperty("user.home")) : recent.get(0);
+		// Mirrors live in the plugin's cache; never start the folder chooser there.
+		return recentRepositories().stream().filter(path -> !mirrors.isMirror(path)).findFirst()
+				.orElse(Path.of(System.getProperty("user.home")));
+	}
+
+	private boolean isBare(Path root) {
+		if (root == null) return false;
+		GitRepositoryService.RepositoryInfo info = infoCache.get(root.toString());
+		return info != null ? info.bare() : mirrors.isMirror(root);
+	}
+
+	/** Remote mirrors are named after their URL rather than the hashed cache folder. */
+	private String displayName(Path root) {
+		GitRepositoryService.RepositoryInfo info = infoCache.get(root.toString());
+		if (mirrors.isMirror(root) && info != null && info.origin() != null) return RemoteMirrors.displayName(info.origin());
+		return repositoryName(root);
 	}
 
 	private static Path repository(GitNode node) {

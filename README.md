@@ -18,6 +18,7 @@ plugin deliberately does not try to be an IDE or a general-purpose Git GUI.
 - Compare a historical file with its working-tree version or explicitly
   restore that version.
 - Copy historical files and directories into the opposite local file panel.
+- Browse a remote repository by URL through a locally cached mirror.
 
 ## Opening the panel
 
@@ -25,6 +26,14 @@ Choose **Git** from the left or right panel location menu, then select
 **Open Repository…**. Selecting any nested directory automatically discovers
 the enclosing repository. Repositories opened successfully appear in the
 recent list.
+
+To browse a repository you have not cloned, select **Open Remote URL…** and
+enter an HTTPS or SSH URL. The plugin runs `git clone --mirror` into
+`~/.nuclr/git/mirrors` on first open and `git fetch --prune` when the URL is
+opened again or **Fetch all** is chosen. A mirror is read-only: branches,
+commits, tags, history trees, quick view and copying files out all work, but
+working-tree actions and Push are not offered. **Remove and delete local
+mirror** in the context menu of the repository list frees the disk space.
 
 The mounted layout is:
 

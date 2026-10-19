@@ -15,6 +15,7 @@ record GitNode(Kind kind, String repository, String revision, String relativePat
 	enum Kind {
 		ROOT,
 		OPEN_REPOSITORY,
+		OPEN_REMOTE,
 		REPOSITORY,
 		WORKTREE,
 		WORKTREE_DIRECTORY,
@@ -47,6 +48,10 @@ record GitNode(Kind kind, String repository, String revision, String relativePat
 
 	static GitNode openRepository() {
 		return new GitNode(Kind.OPEN_REPOSITORY, null, null, null, null);
+	}
+
+	static GitNode openRemote() {
+		return new GitNode(Kind.OPEN_REMOTE, null, null, null, null);
 	}
 
 	static GitNode repository(String repository) {

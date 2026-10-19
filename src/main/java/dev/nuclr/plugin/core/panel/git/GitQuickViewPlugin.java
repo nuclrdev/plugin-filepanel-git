@@ -7,7 +7,6 @@ package dev.nuclr.plugin.core.panel.git;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -28,7 +27,6 @@ import dev.nuclr.platform.plugin.QuickViewNuclrPlugin;
 /** Theme-aware quick viewer for Git status entries, commits, refs and historical blobs. */
 public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 
-	private static final int MAX_BLOB_BYTES = 2 * 1024 * 1024;
 	private final GitRepositoryService repositories = new GitRepositoryService();
 	private final JPanel panel = new JPanel(new BorderLayout());
 	private final JLabel title = new JLabel("Git");
@@ -63,7 +61,11 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 		if (!(resource instanceof GitResource git)) return false;
 		return switch (git.node().kind()) {
 			case WORKTREE_FILE -> !git.getMetadata("Git", "").isBlank();
-			case STATUS_FILE, REVISION_BLOB, COMMIT, REF, STASH -> true;
+			case STATUS_FILE, COMMIT, REF, STASH -> true;
+			// Historical file content is left to the content viewers (syntax-highlighted
+			// text, images, PDF…), which read it through GitResource.openInputStream().
+			// Only submodule entries have no content of their own to show.
+			case REVISION_BLOB -> "submodule".equals(git.getMetadata("Git", ""));
 			default -> false;
 		};
 	}
@@ -116,20 +118,9 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 				yield result.toString();
 			}
 			case COMMIT, REF, STASH -> repositories.commitDetails(root, node.revision());
-			case REVISION_BLOB -> "submodule".equals(resource.getMetadata("Git", ""))
-					? "Git submodule entry\n\nCommit: " + node.value()
-					: renderBlob(repositories.blob(root, node.value(), MAX_BLOB_BYTES));
+			case REVISION_BLOB -> "Git submodule entry\n\nCommit: " + node.value();
 			default -> "";
 		};
-	}
-
-	private static String renderBlob(byte[] bytes) {
-		int length = Math.min(bytes.length, MAX_BLOB_BYTES);
-		for (int i = 0; i < Math.min(length, 8192); i++) {
-			if (bytes[i] == 0) return "Binary file — " + GitResource.displaySize(bytes.length);
-		}
-		String content = new String(bytes, 0, length, StandardCharsets.UTF_8);
-		return bytes.length > MAX_BLOB_BYTES ? content + "\n\n… file truncated …\n" : content;
 	}
 
 	@Override

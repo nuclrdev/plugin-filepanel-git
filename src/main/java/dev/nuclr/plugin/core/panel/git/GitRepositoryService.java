@@ -43,7 +43,7 @@ import org.eclipse.jgit.treewalk.filter.PathFilter;
 /** JGit-backed read model for repositories and historical trees. */
 final class GitRepositoryService {
 
-	record RepositoryInfo(Path root, String branch, String state, boolean bare) {}
+	record RepositoryInfo(Path root, String branch, String state, boolean bare, String origin) {}
 	record RefInfo(String name, String fullName, String revision) {}
 	record CommitInfo(String id, String shortId, String subject, String author, Instant instant, int parentCount) {}
 	record TreeEntry(String name, String path, String objectId, boolean directory, boolean symlink,
@@ -72,7 +72,8 @@ final class GitRepositoryService {
 				branch = head == null ? "unborn" : "detached @ " + head.abbreviate(7).name();
 			}
 			return new RepositoryInfo(repositoryRoot(repository), branch,
-					repository.getRepositoryState().getDescription(), repository.isBare());
+					repository.getRepositoryState().getDescription(), repository.isBare(),
+					repository.getConfig().getString("remote", "origin", "url"));
 		}
 	}
 

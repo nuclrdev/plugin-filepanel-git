@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -156,6 +157,46 @@ class GitFilePanelPluginTest {
 		var discardItem = items.stream().filter(item -> "git.discard".equals(item.getActionType())).findFirst().orElseThrow();
 		assertTrue(discardItem.isEnabled(), "Discard should be enabled when selection includes working changes alongside untracked files");
 
+		plugin.unload();
+	}
+
+	@Test
+	void historicalFilesAreLeftToContentViewersExceptSubmodules() {
+		GitQuickViewPlugin quickView = new GitQuickViewPlugin();
+		GitResource blob = new GitResource(new GitNode(GitNode.Kind.REVISION_BLOB, "repo", "HEAD", "src/App.java",
+				"0123456789012345678901234567890123456789"), null, "App.java", false, null, 10);
+		GitResource submodule = new GitResource(new GitNode(GitNode.Kind.REVISION_BLOB, "repo", "HEAD", "lib",
+				"0123456789012345678901234567890123456789"), null, "lib", false, null, 0).marker("submodule");
+		GitResource modified = new GitResource(new GitNode(GitNode.Kind.STATUS_FILE, "repo", null, "App.java", null),
+				null, "App.java", false, null, 10).marker(" M");
+		assertFalse(quickView.supports(blob));
+		assertTrue(quickView.supports(submodule));
+		assertTrue(quickView.supports(modified));
+	}
+
+	@Test
+	void remoteMirrorIsBrowsableButOffersOnlyFetch() throws Exception {
+		Assumptions.assumeTrue(new NativeGitRunner().available(), "native git is not installed");
+		Path origin = repository(temp.resolve("origin-repo"));
+		Path cache = temp.resolve("mirrors");
+		Path mirror = new RemoteMirrors(cache, new NativeGitRunner()).open(origin.toString(), () -> false).toRealPath();
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin(cache);
+		plugin.preinit(new FakeContext());
+
+		GitResource repository = new GitResource(GitNode.repository(mirror.toString()), GitNode.root(),
+				"origin-repo", true, null, 0);
+		var categories = plugin.openResource(repository, null);
+		assertFalse(categories.getEntries().stream().anyMatch(entry -> entry.getName().equals("Working Tree")));
+		assertTrue(categories.getEntries().stream().anyMatch(entry -> entry.getName().equals("Branches")));
+		assertTrue(plugin.getCurrentLocationDisplayText().startsWith("origin-repo — "));
+
+		var actions = plugin.contextMenuItems(repository, List.of(repository)).stream()
+				.map(item -> item.getActionType()).toList();
+		assertTrue(actions.contains("git.fetch"));
+		assertTrue(actions.contains("git.recent.remove"));
+		assertFalse(actions.contains("git.commit"));
+		assertFalse(actions.contains("git.push"));
+		assertFalse(actions.contains("git.pull"));
 		plugin.unload();
 	}
 
