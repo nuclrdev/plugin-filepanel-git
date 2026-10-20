@@ -15,8 +15,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.errors.MissingObjectException;
+import org.eclipse.jgit.lib.AnyObjectId;
+import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.api.ListBranchCommand.ListMode;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.blame.BlameResult;
@@ -30,8 +34,10 @@ import org.eclipse.jgit.lib.ObjectStream;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
+import org.eclipse.jgit.storage.file.WindowCacheConfig;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
@@ -43,7 +49,26 @@ import org.eclipse.jgit.treewalk.filter.PathFilter;
 /** JGit-backed read model for repositories and historical trees. */
 final class GitRepositoryService {
 
-	record RepositoryInfo(Path root, String branch, String state, boolean bare, String origin) {}
+	/** Config key marking a repository created by {@link RemoteMirrors} for on-demand browsing. */
+	static final String ON_DEMAND_SECTION = "nuclr";
+	static final String ON_DEMAND_KEY = "ondemand";
+	private static final int MAX_MISSING_RETRIES = 4;
+
+	private final LazyRemote lazy = new LazyRemote(new NativeGitRunner());
+
+	/**
+	 * Closes every pack file JGit keeps open in its shared window cache. JGit
+	 * releases cached packs lazily, after their repository is closed, and Windows
+	 * refuses to delete an open file — so call this before deleting a repository.
+	 * The plugin's classloader has its own JGit, so no other plugin is affected;
+	 * open repositories just reopen their packs on the next read.
+	 */
+	static void releasePackFiles() {
+		new WindowCacheConfig().install();
+	}
+
+	/** {@code onDemand}: a lazy remote repository holding only the objects looked at so far. */
+	record RepositoryInfo(Path root, String branch, String state, boolean bare, String origin, boolean onDemand) {}
 	record RefInfo(String name, String fullName, String revision) {}
 	record CommitInfo(String id, String shortId, String subject, String author, Instant instant, int parentCount) {}
 	record TreeEntry(String name, String path, String objectId, boolean directory, boolean symlink,
@@ -73,7 +98,7 @@ final class GitRepositoryService {
 			}
 			return new RepositoryInfo(repositoryRoot(repository), branch,
 					repository.getRepositoryState().getDescription(), repository.isBare(),
-					repository.getConfig().getString("remote", "origin", "url"));
+					repository.getConfig().getString("remote", "origin", "url"), isOnDemand(repository));
 		}
 	}
 
@@ -131,7 +156,81 @@ final class GitRepositoryService {
 		}
 	}
 
+	/** True for a lazy remote repository created by {@link RemoteMirrors}. */
+	boolean isOnDemand(Path root) throws IOException {
+		try (Repository repository = open(root)) {
+			return isOnDemand(repository);
+		}
+	}
+
+	/**
+	 * Commits of the history pages loaded so far, newest first. The walk stops at
+	 * shallow boundaries, so it never reaches for a commit that is not here.
+	 */
+	List<CommitInfo> loadedCommits(Path root, int maxCount) throws IOException {
+		List<String> pages = lazy.pages(root);
+		if (pages.isEmpty()) return List.of();
+		try (Repository repository = open(root); RevWalk walk = new RevWalk(repository)) {
+			walk.sort(RevSort.COMMIT_TIME_DESC);
+			for (String page : pages) walk.markStart(walk.parseCommit(ObjectId.fromString(page)));
+			var result = new ArrayList<CommitInfo>();
+			for (RevCommit commit : walk) {
+				if (result.size() >= maxCount) break;
+				result.add(commit(commit, null));
+			}
+			return result;
+		}
+	}
+
+	/** Where the next history page starts, or null when the history is complete. */
+	String nextPageStart(Path root) throws IOException {
+		List<String> pages = lazy.pages(root);
+		try (Repository repository = open(root); RevWalk walk = new RevWalk(repository)) {
+			ObjectId start = pages.isEmpty() ? repository.resolve("HEAD") : ObjectId.fromString(pages.get(pages.size() - 1));
+			if (start == null) return null;
+			if (pages.isEmpty()) return start.name();
+			// Follow first parents to the page's shallow boundary; JGit reports a
+			// shallow commit as parentless, so its real parent comes from the raw object.
+			RevCommit commit = walk.parseCommit(start);
+			while (commit.getParentCount() > 0) commit = walk.parseCommit(commit.getParent(0));
+			List<ObjectId> parents = rawParents(repository, commit);
+			return parents.isEmpty() ? null : parents.get(0).name();
+		}
+	}
+
+	/** Fetches the next history page; returns false when there is none. */
+	boolean loadNextPage(Path root, int depth, BooleanSupplier cancelled) throws IOException {
+		String start = nextPageStart(root);
+		if (start == null) return false;
+		lazy.fetchCommits(root, start, depth, cancelled);
+		lazy.addPage(root, start);
+		return true;
+	}
+
+	/** Fetches the history page starting at {@code start} unless it is already loaded. */
+	void loadPage(Path root, String start, int depth, BooleanSupplier cancelled) throws IOException {
+		if (lazy.pages(root).contains(start)) return;
+		lazy.fetchCommits(root, start, depth, cancelled);
+		lazy.addPage(root, start);
+	}
+
+	void refreshOnDemand(Path root, BooleanSupplier cancelled) throws IOException {
+		lazy.refreshRefs(root, cancelled);
+	}
+
 	List<TreeEntry> tree(Path root, String revision, String relativePath) throws IOException {
+		for (int attempt = 0;; attempt++) {
+			try {
+				return readTree(root, revision, relativePath);
+			} catch (MissingObjectException missing) {
+				// Promisor repositories hold trees only once someone looked at them.
+				if (attempt >= MAX_MISSING_RETRIES || !isPromisor(root)) throw missing;
+				lazy.ensure(root, missing.getObjectId());
+			}
+		}
+	}
+
+	private List<TreeEntry> readTree(Path root, String revision, String relativePath) throws IOException {
 		try (Repository repository = open(root)) {
 			ObjectId tree = repository.resolve(revision + "^{tree}");
 			if (tree == null) return List.of();
@@ -153,7 +252,9 @@ final class GitRepositoryService {
 					boolean gitlink = FileMode.GITLINK.equals(mode);
 					boolean executable = FileMode.EXECUTABLE_FILE.equals(mode);
 					ObjectId objectId = walk.getObjectId(0);
-					long size = directory || gitlink ? 0L : repository.open(objectId).getSize();
+					// -1: the file has not been downloaded, and is not fetched just to be measured.
+					long size = directory || gitlink ? 0L
+							: repository.getObjectDatabase().has(objectId) ? repository.open(objectId).getSize() : -1L;
 					String childPath = path.isEmpty() ? walk.getNameString() : path + "/" + walk.getNameString();
 					entries.add(new TreeEntry(walk.getNameString(), childPath, objectId.name(), directory,
 							symlink, gitlink, executable, size));
@@ -179,6 +280,13 @@ final class GitRepositoryService {
 
 	InputStream openBlob(Path root, String objectId) throws IOException {
 		Repository repository = open(root);
+		try {
+			ObjectId id = ObjectId.fromString(objectId);
+			if (isPromisor(repository) && !repository.getObjectDatabase().has(id)) lazy.ensure(root, id);
+		} catch (IOException | RuntimeException e) {
+			repository.close();
+			throw e;
+		}
 		ObjectReader reader = repository.newObjectReader();
 		try {
 			ObjectStream stream = reader.open(ObjectId.fromString(objectId)).openStream();
@@ -250,6 +358,7 @@ final class GitRepositoryService {
 				DiffFormatter formatter = formatter(repository, output)) {
 			ObjectId id = repository.resolve(revision + "^{commit}");
 			if (id == null) return "Commit not found: " + revision;
+			if (isOnDemand(repository)) return onDemandCommitDetails(root, repository, id);
 			RevCommit commit = walk.parseCommit(id);
 			StringBuilder header = new StringBuilder()
 					.append("commit ").append(commit.name()).append('\n')
@@ -270,6 +379,37 @@ final class GitRepositoryService {
 		}
 	}
 
+	/**
+	 * Native git diffs on-demand commits: it downloads the changed files in one
+	 * batch, where JGit would fail on the first missing one. The parent is
+	 * fetched first at depth 1 — left to git, a missing commit would arrive with
+	 * its whole history.
+	 */
+	private String onDemandCommitDetails(Path root, Repository repository, ObjectId id) throws IOException {
+		RevCommit commit;
+		try (RevWalk walk = new RevWalk(repository)) {
+			commit = walk.parseCommit(id);
+		}
+		StringBuilder header = new StringBuilder()
+				.append("commit ").append(commit.name()).append('\n')
+				.append("Author: ").append(commit.getAuthorIdent().getName()).append(" <")
+				.append(commit.getAuthorIdent().getEmailAddress()).append(">\n")
+				.append("Date:   ").append(commit.getAuthorIdent().getWhenAsInstant()).append("\n\n")
+				.append(commit.getFullMessage()).append("\n\n");
+		List<ObjectId> parents = rawParents(repository, commit);
+		NativeGitRunner nativeGit = new NativeGitRunner();
+		NativeGitRunner.Result diff;
+		if (parents.isEmpty()) {
+			diff = nativeGit.run(root, null, "-c", "core.quotepath=false", "show", "--format=", "-M", commit.name());
+		} else {
+			ObjectId parent = parents.get(0);
+			if (!repository.getObjectDatabase().has(parent)) lazy.fetchCommits(root, parent.name(), 1, null);
+			diff = nativeGit.run(root, null, "-c", "core.quotepath=false", "diff", "-M", parent.name(), commit.name());
+		}
+		if (!diff.succeeded()) throw new NativeGitRunner.GitCommandException("Diff", diff);
+		return header + diff.output();
+	}
+
 	String revisionToWorkingDiff(Path root, String revision, String path) throws IOException {
 		try (Repository repository = open(root);
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -288,6 +428,7 @@ final class GitRepositoryService {
 
 	String history(Path root, String path, int maxCount) throws IOException {
 		try (Repository repository = open(root); Git git = new Git(repository)) {
+			requireFullHistory(repository);
 			var command = git.log().setMaxCount(maxCount);
 			if (!blank(path)) command.addPath(GitNode.normalizeGitPath(path));
 			StringBuilder result = new StringBuilder();
@@ -305,6 +446,7 @@ final class GitRepositoryService {
 
 	String blame(Path root, String path, int maxLines) throws IOException {
 		try (Repository repository = open(root); Git git = new Git(repository)) {
+			requireFullHistory(repository);
 			BlameResult blame = git.blame().setFilePath(GitNode.normalizeGitPath(path)).call();
 			if (blame == null || blame.getResultContents() == null) return "No blame information available.";
 			StringBuilder result = new StringBuilder();
@@ -321,6 +463,42 @@ final class GitRepositoryService {
 		} catch (GitAPIException e) {
 			throw new IOException("Unable to blame file", e);
 		}
+	}
+
+	private static void requireFullHistory(Repository repository) throws IOException {
+		if (isOnDemand(repository)) {
+			throw new IOException("File history and blame need the full history. Use \"Download full history\" first.");
+		}
+	}
+
+	private static boolean isOnDemand(Repository repository) {
+		return repository.getConfig().getBoolean(ON_DEMAND_SECTION, ON_DEMAND_KEY, false);
+	}
+
+	/** Any partial clone, ours or the user's: missing objects can be fetched from the promisor remote. */
+	private static boolean isPromisor(Repository repository) {
+		var config = repository.getConfig();
+		return config.getString("extensions", null, "partialclone") != null
+				|| config.getBoolean("remote", "origin", "promisor", false);
+	}
+
+	private static boolean isPromisor(Path root) throws IOException {
+		try (Repository repository = open(root)) {
+			return isPromisor(repository);
+		}
+	}
+
+	/** Parents as written in the commit object; JGit hides them for shallow commits. */
+	private static List<ObjectId> rawParents(Repository repository, AnyObjectId commit) throws IOException {
+		byte[] raw = repository.open(commit, Constants.OBJ_COMMIT).getCachedBytes();
+		var parents = new ArrayList<ObjectId>();
+		for (String line : new String(raw, StandardCharsets.UTF_8).split("\n")) {
+			if (line.isEmpty()) break;
+			if (line.startsWith("parent ") && ObjectId.isId(line.substring(7).strip())) {
+				parents.add(ObjectId.fromString(line.substring(7).strip()));
+			}
+		}
+		return parents;
 	}
 
 	private static DiffFormatter formatter(Repository repository, ByteArrayOutputStream output) {

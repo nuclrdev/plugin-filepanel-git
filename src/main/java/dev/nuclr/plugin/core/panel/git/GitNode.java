@@ -28,6 +28,8 @@ record GitNode(Kind kind, String repository, String revision, String relativePat
 		REF,
 		COMMITS,
 		COMMIT,
+		/** "Load more…" at the end of an on-demand history; {@code value} is the page's start commit. */
+		LOAD_MORE_COMMITS,
 		TAGS,
 		STASHES,
 		STASH,

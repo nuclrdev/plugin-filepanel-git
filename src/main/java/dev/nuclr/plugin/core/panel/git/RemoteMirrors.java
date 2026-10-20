@@ -22,10 +22,11 @@ import java.util.Locale;
 import java.util.function.BooleanSupplier;
 
 /**
- * Local {@code git clone --mirror} copies of remote repositories. Git cannot
- * browse a remote without downloading its objects, so a remote URL is opened
- * as a bare mirror under the cache directory and read like any local bare
- * repository; Fetch keeps it current.
+ * Local copies of remote repositories under the cache directory. Git cannot
+ * browse a remote without downloading its objects, so a URL opens as a bare
+ * on-demand repository (see {@link LazyRemote}) that downloads only what is
+ * looked at; "Download full history" replaces it with a {@code clone --mirror}
+ * copy. Both are read like any local bare repository.
  */
 final class RemoteMirrors {
 
@@ -48,14 +49,21 @@ final class RemoteMirrors {
 		return normalized.startsWith(cacheRoot) || normalized.startsWith(realCacheRoot());
 	}
 
-	/** Deterministic cache location for a URL, so reopening it reuses the mirror. */
+	/** Deterministic cache location of the full mirror of a URL, so reopening it reuses the mirror. */
 	Path pathFor(String url) {
 		return cacheRoot.resolve(slug(url) + "-" + hash(url) + ".git");
 	}
 
+	/** Cache location of the on-demand repository of a URL. */
+	Path onDemandPathFor(String url) {
+		return cacheRoot.resolve(slug(url) + "-" + hash(url) + ".lazy.git");
+	}
+
 	/**
-	 * Clones {@code url} as a mirror, or fetches into the existing mirror when it
-	 * was opened before. Returns the mirror directory.
+	 * Opens {@code url}: a full mirror downloaded earlier is fetched and reused;
+	 * otherwise an on-demand repository is created (or refreshed), which holds
+	 * branch and tag tips only and downloads trees, files and history pages as
+	 * they are looked at. Returns the repository directory.
 	 */
 	Path open(String url, BooleanSupplier cancelled) throws IOException {
 		String clean = validate(url);
@@ -64,20 +72,69 @@ final class RemoteMirrors {
 			nativeGit.requireSuccess("Fetch " + clean, mirror, cancelled, "fetch", "--prune");
 			return mirror;
 		}
+		Path onDemand = onDemandPathFor(clean);
+		if (Files.isRegularFile(onDemand.resolve("HEAD"))) {
+			new LazyRemote(nativeGit).refreshRefs(onDemand, cancelled);
+			return onDemand;
+		}
+		return build(onDemand, partial -> createOnDemand(clean, partial, cancelled));
+	}
+
+	/**
+	 * Replaces the on-demand repository of {@code url} with a full mirror, which
+	 * file history and blame need. Returns the mirror directory.
+	 */
+	Path downloadFullHistory(String url, BooleanSupplier cancelled) throws IOException {
+		String clean = validate(url);
+		Path mirror = pathFor(clean);
+		if (!Files.isRegularFile(mirror.resolve("HEAD"))) {
+			build(mirror, partial -> nativeGit.requireSuccess("Clone " + clean, null, cancelled,
+					"clone", "--mirror", "--", clean, partial.toString()));
+		}
+		delete(onDemandPathFor(clean));
+		return mirror;
+	}
+
+	private void createOnDemand(String url, Path target, BooleanSupplier cancelled) throws IOException {
+		nativeGit.requireSuccess("Create repository", null, cancelled, "init", "--quiet", "--bare", target.toString());
+		String[][] settings = {
+				{ "remote.origin.url", url },
+				{ "remote.origin.fetch", "+refs/heads/*:refs/heads/*" },
+				{ "remote.origin.promisor", "true" },
+				{ "remote.origin.partialclonefilter", "tree:0" },
+				{ "remote.origin.tagOpt", "--no-tags" },
+				// Background gc races page fetches for the shallow file; the cache is small anyway.
+				{ "gc.auto", "0" },
+				{ "maintenance.auto", "false" },
+				{ GitRepositoryService.ON_DEMAND_SECTION + "." + GitRepositoryService.ON_DEMAND_KEY, "true" } };
+		for (String[] setting : settings) {
+			nativeGit.requireSuccess("Configure repository", target, cancelled, "config", setting[0], setting[1]);
+		}
+		nativeGit.requireSuccess("Configure repository", target, cancelled,
+				"config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*");
+		new LazyRemote(nativeGit).refreshRefs(target, cancelled);
+	}
+
+	/**
+	 * Builds a repository beside its final location and moves it into place
+	 * afterwards, so a cancelled or failed download never leaves a half-written
+	 * repository behind.
+	 */
+	private Path build(Path target, IoConsumer<Path> creator) throws IOException {
 		Files.createDirectories(cacheRoot);
-		// Clone beside the final location and move into place afterwards, so a
-		// cancelled or failed clone never leaves a half-written mirror behind.
-		Path partial = mirror.resolveSibling(mirror.getFileName() + ".partial");
+		Path partial = target.resolveSibling(target.getFileName() + ".partial");
 		delete(partial);
 		try {
-			nativeGit.requireSuccess("Clone " + clean, null, cancelled,
-					"clone", "--mirror", "--", clean, partial.toString());
-			Files.move(partial, mirror, StandardCopyOption.ATOMIC_MOVE);
+			creator.accept(partial);
+			Files.move(partial, target, StandardCopyOption.ATOMIC_MOVE);
 		} finally {
 			delete(partial);
 		}
-		return mirror;
+		return target;
 	}
+
+	@FunctionalInterface
+	private interface IoConsumer<T> { void accept(T value) throws IOException; }
 
 	/** Deletes a mirror; refuses paths outside the cache. */
 	void remove(Path mirror) throws IOException {
@@ -132,6 +189,7 @@ final class RemoteMirrors {
 
 	private static void delete(Path directory) throws IOException {
 		if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return;
+		GitRepositoryService.releasePackFiles();
 		Files.walkFileTree(directory, new SimpleFileVisitor<>() {
 			@Override public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
 				deleteWritable(file);

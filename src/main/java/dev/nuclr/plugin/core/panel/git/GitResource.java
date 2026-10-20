@@ -50,7 +50,8 @@ final class GitResource extends NuclrResource {
 		metadata.put("git.localPath", localPath == null ? "" : localPath.toAbsolutePath().normalize().toString());
 		metadata.put("Name", name);
 		metadata.put(META_MARKER, "");
-		metadata.put("Size", folder ? "" : displaySize(length));
+		// A negative size means unknown: an on-demand file that has not been downloaded yet.
+		metadata.put("Size", folder || size < 0 ? "" : displaySize(length));
 		metadata.put("Author", "");
 		metadata.put("Date", "");
 		metadata.put("Message", "");

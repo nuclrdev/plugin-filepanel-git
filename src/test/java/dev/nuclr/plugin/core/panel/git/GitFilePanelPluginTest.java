@@ -52,6 +52,32 @@ class GitFilePanelPluginTest {
 	}
 
 	@Test
+	void repositoryIsRemovedFromTheListByF8OrTheDeleteKey() throws Exception {
+		Path first = repository(temp.resolve("first"));
+		Path second = repository(temp.resolve("second"));
+		FakeContext context = new FakeContext();
+		context.getSettings().set(GitFilePanelPlugin.PLUGIN_ID, "recentRepositories",
+				List.of(first.toString(), second.toString()));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(context);
+		var menuRoot = plugin.getPluginMenuItems().getMenuItems().get(0).getPath();
+
+		var listed = plugin.openResource(menuRoot, null).getEntries();
+		assertTrue(plugin.menuItems(listed.get(2)).stream()
+				.anyMatch(item -> "F8".equals(item.getFunctionKey()) && "git.recent.remove".equals(item.getEventType())));
+		NuclrResource entry = listed.stream().filter(each -> each.getName().startsWith("first")).findFirst().orElseThrow();
+		plugin.act(null, "git.recent.remove", List.of(entry), entry, new HashMap<>(), null);
+		entry = plugin.openResource(menuRoot, null).getEntries().stream()
+				.filter(each -> each.getName().startsWith("second")).findFirst().orElseThrow();
+		plugin.act(null, "delete", List.of(entry), entry, new HashMap<>(), null);
+
+		var names = plugin.openResource(menuRoot, null).getEntries().stream().map(NuclrResource::getName).toList();
+		assertEquals(List.of("Open Repository…", "Open Remote URL…"), names);
+		assertTrue(Files.isDirectory(first.resolve(".git")), "removing from the list leaves the repository alone");
+		plugin.unload();
+	}
+
+	@Test
 	void workingTreeAndCommitTreesExposeReadableFiles() throws Exception {
 		Path root = repository(temp.resolve("repo-content"));
 		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
@@ -161,6 +187,49 @@ class GitFilePanelPluginTest {
 	}
 
 	@Test
+	void workspaceRestoreReopensTheSavedFolderOrFallsBackToTheRoot() throws Exception {
+		Path root = repository(temp.resolve("repo-restore"));
+		GitFilePanelPlugin before = new GitFilePanelPlugin();
+		before.preinit(new FakeContext());
+		GitResource worktree = new GitResource(new GitNode(GitNode.Kind.WORKTREE_DIRECTORY, root.toString(), null, "src", null),
+				null, "src", true, null, 0);
+		Files.createDirectories(root.resolve("src"));
+		before.openResource(worktree, null);
+		Map<String, Object> saved = new HashMap<>();
+		before.act(null, "workspace.save.state", List.of(), null, saved, null);
+		before.unload();
+
+		GitFilePanelPlugin after = new GitFilePanelPlugin();
+		after.preinit(new FakeContext());
+		var restored = restore(after, saved.get("workspace.state"));
+		assertEquals("restored", restored.get("workspace.restore.result"));
+		GitResource location = (GitResource) restored.get("workspace.restore.resource");
+		assertEquals(GitNode.Kind.WORKTREE_DIRECTORY, location.node().kind());
+		assertEquals("src", location.node().relativePath());
+		assertTrue(after.supports(location));
+
+		// No state (saved before the plugin took part), a dialog entry, or a deleted repository: the Git root.
+		assertEquals(GitNode.Kind.ROOT, restoredKind(after, null));
+		assertEquals(GitNode.Kind.ROOT, restoredKind(after, Map.of("kind", "OPEN_REMOTE")));
+		assertEquals(GitNode.Kind.ROOT, restoredKind(after, Map.of("kind", "COMMITS",
+				"repository", temp.resolve("deleted").toString())));
+		assertEquals(GitNode.Kind.ROOT, ((GitResource) after.getCurrentResource()).node().kind(),
+				"a fresh instance shows the Git root, never an empty panel");
+		after.unload();
+	}
+
+	private static Map<String, Object> restore(GitFilePanelPlugin plugin, Object state) {
+		Map<String, Object> data = new HashMap<>();
+		data.put("workspace.state", state);
+		plugin.act(null, "workspace.restore.state", List.of(), null, data, null);
+		return data;
+	}
+
+	private static GitNode.Kind restoredKind(GitFilePanelPlugin plugin, Object state) {
+		return ((GitResource) restore(plugin, state).get("workspace.restore.resource")).node().kind();
+	}
+
+	@Test
 	void historicalFilesAreLeftToContentViewersExceptSubmodules() {
 		GitQuickViewPlugin quickView = new GitQuickViewPlugin();
 		GitResource blob = new GitResource(new GitNode(GitNode.Kind.REVISION_BLOB, "repo", "HEAD", "src/App.java",
@@ -175,11 +244,11 @@ class GitFilePanelPluginTest {
 	}
 
 	@Test
-	void remoteMirrorIsBrowsableButOffersOnlyFetch() throws Exception {
+	void remoteRepositoryIsBrowsableButOffersOnlyFetch() throws Exception {
 		Assumptions.assumeTrue(new NativeGitRunner().available(), "native git is not installed");
-		Path origin = repository(temp.resolve("origin-repo"));
+		String url = RemoteMirrorsTest.origin(temp.resolve("origin-repo"), 30);
 		Path cache = temp.resolve("mirrors");
-		Path mirror = new RemoteMirrors(cache, new NativeGitRunner()).open(origin.toString(), () -> false).toRealPath();
+		Path mirror = new RemoteMirrors(cache, new NativeGitRunner()).open(url, () -> false).toRealPath();
 		GitFilePanelPlugin plugin = new GitFilePanelPlugin(cache);
 		plugin.preinit(new FakeContext());
 
@@ -194,9 +263,21 @@ class GitFilePanelPluginTest {
 				.map(item -> item.getActionType()).toList();
 		assertTrue(actions.contains("git.fetch"));
 		assertTrue(actions.contains("git.recent.remove"));
+		assertTrue(actions.contains("git.history.full"));
 		assertFalse(actions.contains("git.commit"));
 		assertFalse(actions.contains("git.push"));
 		assertFalse(actions.contains("git.pull"));
+
+		// Commits arrive a page at a time; "Load more…" fetches the next page.
+		GitResource commits = new GitResource(new GitNode(GitNode.Kind.COMMITS, mirror.toString(), "HEAD", null, null),
+				GitNode.repository(mirror.toString()), "Commits", true, null, 0);
+		var firstPage = plugin.openResource(commits, null).getEntries();
+		var loadMore = firstPage.get(firstPage.size() - 1);
+		assertEquals("Load more…", loadMore.getName());
+		var secondPage = plugin.openResource(loadMore, null).getEntries();
+		assertTrue(secondPage.size() > firstPage.size());
+		assertEquals(secondPage.size(), plugin.openResource(loadMore, null).getEntries().size(),
+				"reopening the same entry (a refresh) must not fetch another page");
 		plugin.unload();
 	}
 
