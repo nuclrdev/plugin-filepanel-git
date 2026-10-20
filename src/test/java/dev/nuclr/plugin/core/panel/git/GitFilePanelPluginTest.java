@@ -78,6 +78,111 @@ class GitFilePanelPluginTest {
 	}
 
 	@Test
+	void localHistoryPastTheFirstPageIsReachedThroughLoadMore() throws Exception {
+		Path root = repository(temp.resolve("long-history"));
+		try (Git git = Git.open(root.toFile())) {
+			PersonIdent person = new PersonIdent("Nuclr Test", "test@nuclr.dev");
+			for (int i = 0; i < 260; i++) {
+				git.commit().setMessage("commit " + i).setAllowEmpty(true).setAuthor(person).setCommitter(person).call();
+			}
+		}
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+		GitResource commits = new GitResource(new GitNode(GitNode.Kind.COMMITS, root.toString(), "HEAD", null, null),
+				GitNode.repository(root.toString()), "Commits", true, null, 0);
+
+		var first = commitEntries(plugin.openResource(commits, null).getEntries());
+		assertEquals(251, first.size(), "250 commits and the entry offering more");
+		var loadMore = first.get(first.size() - 1);
+		assertEquals("Load more…", loadMore.getName());
+		var all = commitEntries(plugin.openResource(loadMore, null).getEntries());
+		assertEquals(261, all.size(), "every commit, and nothing more to offer");
+		assertFalse(all.stream().anyMatch(entry -> entry.getName().equals("Load more…")));
+		assertEquals(261, commitEntries(plugin.openResource(commits, null).getEntries()).size(),
+				"the Commits list keeps what was loaded");
+		plugin.unload();
+	}
+
+	private static List<NuclrResource> commitEntries(List<NuclrResource> entries) {
+		return entries.stream().filter(entry -> !"..".equals(entry.getName())).toList();
+	}
+
+	@Test
+	void keyBarOffersRepositoryActionsOnlyInsideARepository() throws Exception {
+		Path root = repository(temp.resolve("keys"));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+		var menuRoot = plugin.getPluginMenuItems().getMenuItems().get(0).getPath();
+
+		plugin.openResource(menuRoot, null);
+		var atRoot = plugin.menuItems(null).stream().map(item -> item.getEventType()).toList();
+		assertTrue(atRoot.containsAll(List.of("git.open.other", "git.recent.remove")));
+		assertFalse(atRoot.contains("git.commit"));
+		assertFalse(atRoot.contains("git.stage"));
+
+		plugin.openResource(new GitResource(GitNode.repository(root.toString()), GitNode.root(), "keys", true, null, 0), null);
+		var inside = plugin.menuItems(null).stream().map(item -> item.getEventType()).toList();
+		assertTrue(inside.contains("git.commit"));
+		assertFalse(inside.contains("git.recent.remove"));
+		plugin.unload();
+	}
+
+	@Test
+	void otherPanelsRepositoryIsAddedToTheTopOfTheList() throws Exception {
+		Path root = repository(temp.resolve("beside"));
+		Path inside = Files.createDirectories(root.resolve("src/deep"));
+		GitFilePanelPlugin plugin = new GitFilePanelPlugin();
+		plugin.preinit(new FakeContext());
+		var menuRoot = plugin.getPluginMenuItems().getMenuItems().get(0).getPath();
+
+		plugin.act(new DestinationPanel(inside), "git.open.other", List.of(), null, new HashMap<>(), null);
+
+		var entries = plugin.openResource(menuRoot, null).getEntries();
+		assertEquals(3, entries.size());
+		assertTrue(entries.get(2).getName().startsWith("beside"), entries.get(2).getName());
+		plugin.unload();
+	}
+
+	@Test
+	void porcelainStatusReadsEveryKindOfChange() {
+		var snapshot = GitStatusSnapshot.fromPorcelain(String.join("\0",
+				"M  staged.txt", " M modified.txt", "MM both.txt", "R  new name.txt", "old name.txt",
+				"?? dir/untracked.txt", "UU conflict.txt", "!! target/", ""));
+		assertEquals("M ", snapshot.entry("staged.txt").marker());
+		assertEquals(" M", snapshot.entry("modified.txt").marker());
+		assertEquals("MM", snapshot.entry("both.txt").marker());
+		assertEquals("R ", snapshot.entry("new name.txt").marker());
+		assertEquals(null, snapshot.entry("old name.txt"), "a rename's source is not an entry of its own");
+		assertEquals("??", snapshot.entry("dir/untracked.txt").marker());
+		assertEquals("UU", snapshot.entry("conflict.txt").marker());
+		assertEquals("!!", snapshot.entry("target").marker());
+		assertEquals(List.of("conflict.txt"), snapshot.conflicts().stream().map(GitStatusSnapshot.Entry::path).toList());
+		assertEquals("??", snapshot.marker("dir", true), "a folder holding only untracked files is marked untracked");
+	}
+
+	@Test
+	void nativeStatusAgreesWithJGit() throws Exception {
+		Assumptions.assumeTrue(new NativeGitRunner().available(), "native git is not installed");
+		Path root = repository(temp.resolve("both-ways"));
+		Files.writeString(root.resolve("tracked.txt"), "changed\n");
+		Files.writeString(root.resolve("added.txt"), "new\n");
+		Files.createDirectories(root.resolve("dir"));
+		Files.writeString(root.resolve("dir/untracked.txt"), "loose\n");
+		try (Git git = Git.open(root.toFile())) {
+			git.add().addFilepattern("added.txt").call();
+		}
+		var result = new NativeGitRunner().runForOutput(root, () -> false, "--no-optional-locks", "status",
+				"--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching");
+		assertTrue(result.succeeded(), result.output());
+		var fromNative = GitStatusSnapshot.fromPorcelain(result.output());
+		var fromJGit = new GitRepositoryService().status(root);
+		for (String path : List.of("tracked.txt", "added.txt", "dir/untracked.txt")) {
+			assertEquals(fromJGit.entry(path).marker(), fromNative.entry(path).marker(), path);
+		}
+		assertEquals(fromJGit.all().size(), fromNative.all().size());
+	}
+
+	@Test
 	void workingTreeAndCommitTreesExposeReadableFiles() throws Exception {
 		Path root = repository(temp.resolve("repo-content"));
 		GitFilePanelPlugin plugin = new GitFilePanelPlugin();

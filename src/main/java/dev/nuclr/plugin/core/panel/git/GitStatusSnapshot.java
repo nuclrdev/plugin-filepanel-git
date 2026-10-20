@@ -61,6 +61,31 @@ final class GitStatusSnapshot {
 		return new GitStatusSnapshot(immutable);
 	}
 
+	/**
+	 * Reads {@code git status --porcelain=v1 -z}: one {@code XY path} record per NUL, a
+	 * rename or copy followed by the path it came from. Ignored directories end in a slash.
+	 */
+	static GitStatusSnapshot fromPorcelain(String output) {
+		var immutable = new LinkedHashMap<String, Entry>();
+		String[] records = output.split("\0");
+		for (int i = 0; i < records.length; i++) {
+			String record = records[i];
+			if (record.length() < 4 || record.charAt(2) != ' ') continue;
+			char x = record.charAt(0);
+			char y = record.charAt(1);
+			if (x == 'R' || x == 'C' || y == 'R' || y == 'C') i++; // the original path
+			String path = GitNode.normalizeGitPath(record.substring(3));
+			if (path.endsWith("/")) path = path.substring(0, path.length() - 1);
+			if (path.isEmpty()) continue;
+			boolean conflict = x == 'U' || y == 'U' || x == 'A' && y == 'A' || x == 'D' && y == 'D';
+			boolean ignored = x == '!';
+			char index = ignored || conflict || x == ' ' ? 0 : x;
+			char worktree = ignored || conflict || y == ' ' ? 0 : y;
+			immutable.put(path, new Entry(path, index, worktree, conflict, ignored));
+		}
+		return new GitStatusSnapshot(immutable);
+	}
+
 	static GitStatusSnapshot empty() {
 		return new GitStatusSnapshot(Map.of());
 	}

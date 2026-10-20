@@ -26,7 +26,9 @@ plugin deliberately does not try to be an IDE or a general-purpose Git GUI.
 Choose **Git** from the left or right panel location menu, then select
 **Open Repository…**. Selecting any nested directory automatically discovers
 the enclosing repository. Repositories opened successfully appear in the
-recent list.
+recent list. When the opposite panel is already inside the repository, F7
+(**From Other Panel**) puts it at the top of the list without the folder
+chooser. F8 or Delete removes the selected repository from the list.
 
 To browse a repository you have not cloned, select **Open Remote URL…** and
 enter an HTTPS or SSH URL. The plugin creates an on-demand repository in
@@ -89,10 +91,15 @@ Git-specific actions are available from the context menu. F2 commits, F3
 views, F5 copies to the opposite panel, Shift+F3 shows a diff, Shift+F5 stages,
 and Shift+F6 unstages.
 
+**Commits** of a local repository lists the newest 250; **Load more…** at the
+end lists 250 more, up to 10,000.
+
 ## Native Git
 
 Eclipse JGit is bundled and provides repository discovery, status, history,
-blame and object/tree browsing. A native `git` executable is required for
+blame and object/tree browsing. When a native `git` is installed, status comes
+from `git status` instead, which uses Git's own caches and is much faster on
+large repositories. A native `git` executable is required for
 mutating and remote operations so that Nuclr honours the user's hooks,
 signing configuration, credential helpers, SSH configuration, filters and
 Git LFS installation.

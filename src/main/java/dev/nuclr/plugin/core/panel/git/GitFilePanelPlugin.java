@@ -56,8 +56,10 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private static final Logger LOG = LoggerFactory.getLogger(GitFilePanelPlugin.class);
 	private static final String SETTINGS_RECENT = "recentRepositories";
 	private static final int MAX_RECENT = 10;
+	/** How many commits a local repository lists at first, and how many more each "Load more…" adds. */
 	private static final int MAX_COMMITS = 250;
-	private static final int MAX_ON_DEMAND_COMMITS = 10_000;
+	/** The most commits a Commits list shows, local or on-demand. */
+	private static final int MAX_LISTED_COMMITS = 10_000;
 	private static final int PAGE_TARGET = 100;
 	private static final int MAX_PAGE_DEPTH = 64;
 	private static final long STATUS_CACHE_NANOS = TimeUnit.SECONDS.toNanos(2);
@@ -87,6 +89,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	/** What Commander sends for the Delete key; in the repository list it removes the entry. */
 	private static final String DELETE_KEY = "delete";
 	private static final String FULL_HISTORY = "git.history.full";
+	private static final String OPEN_OTHER = "git.open.other";
 	/** Actions that need a working tree, refused for bare repositories and remote mirrors. */
 	private static final Set<String> WORKTREE_ACTIONS = Set.of(STAGE, UNSTAGE, DISCARD, DIFF, DIFF_STAGED,
 			COMPARE_WORKTREE, RESTORE_VERSION, COMMIT, CREATE_BRANCH, CHECKOUT, PULL, STASH_CREATE, STASH_APPLY,
@@ -113,6 +116,8 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	private final Map<String, CachedStatus> statusCache = new ConcurrentHashMap<>();
 	private final Map<String, GitRepositoryService.RepositoryInfo> infoCache = new ConcurrentHashMap<>();
 	private final Map<String, Integer> pageDepths = new ConcurrentHashMap<>();
+	/** How many commits each local repository's Commits list shows, grown by "Load more…". */
+	private final Map<String, Integer> commitLimits = new ConcurrentHashMap<>();
 	/** On-demand repositories replaced by a full mirror, so folders still open in them follow it. */
 	private final Map<String, String> replacedRepositories = new ConcurrentHashMap<>();
 	private final ExecutorService actions = Executors.newSingleThreadExecutor(
@@ -388,13 +393,27 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		Path root = repository(folder.node());
 		boolean onDemand = isOnDemand(root);
 		List<GitRepositoryService.CommitInfo> commits;
+		String next = null;
+		String nextDetails = null;
 		if (onDemand) {
 			if (repositories.loadedCommits(root, 1).isEmpty()) {
 				repositories.loadNextPage(root, pageDepth(root), () -> unloading || cancelled(cancelled));
 			}
-			commits = repositories.loadedCommits(root, MAX_ON_DEMAND_COMMITS);
+			commits = repositories.loadedCommits(root, MAX_LISTED_COMMITS);
+			next = commits.size() < MAX_LISTED_COMMITS ? repositories.nextPageStart(root) : null;
+			nextDetails = commits.size() + " commits loaded; older history is downloaded page by page";
 		} else {
-			commits = repositories.commits(root, folder.node().revision(), MAX_COMMITS);
+			// One past the limit says whether there is anything older to offer.
+			int limit = commitLimits.getOrDefault(root.toString(), MAX_COMMITS);
+			commits = repositories.commits(root, folder.node().revision(), limit + 1);
+			if (commits.size() > limit) {
+				commits = commits.subList(0, limit);
+				if (limit < MAX_LISTED_COMMITS) {
+					// The limit it asks for, not "more": reopening the entry (a refresh) shows the same list.
+					next = String.valueOf(Math.min(limit + MAX_COMMITS, MAX_LISTED_COMMITS));
+					nextDetails = limit + " commits shown; older ones are listed " + MAX_COMMITS + " at a time";
+				}
+			}
 		}
 		var entries = new ArrayList<NuclrResource>();
 		for (GitRepositoryService.CommitInfo commit : commits) {
@@ -402,11 +421,10 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			entries.add(resource(node, folder.node(), commit.shortId(), true, null, 0)
 					.details(commit.author(), commit.instant(), commit.subject()));
 		}
-		String next = onDemand && commits.size() < MAX_ON_DEMAND_COMMITS ? repositories.nextPageStart(root) : null;
 		if (next != null) {
 			entries.add(resource(new GitNode(GitNode.Kind.LOAD_MORE_COMMITS, root.toString(), null, null, next),
 					folder.node(), "Load more…", true, null, 0)
-					.details(null, null, commits.size() + " commits loaded; older history is downloaded page by page"));
+					.details(null, null, nextDetails));
 		}
 		showing(folder);
 		return withParent(folder, COMMIT_COLUMNS, entries);
@@ -419,10 +437,21 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 	 */
 	private NuclrResourceData loadMoreCommits(GitResource selected, AtomicBoolean cancelled) throws IOException {
 		Path root = repository(selected.node());
-		int before = repositories.loadedCommits(root, MAX_ON_DEMAND_COMMITS).size();
-		repositories.loadPage(root, selected.node().value(), pageDepth(root), () -> unloading || cancelled(cancelled));
-		int added = repositories.loadedCommits(root, MAX_ON_DEMAND_COMMITS).size() - before;
-		adaptPageDepth(root, added);
+		if (isOnDemand(root)) {
+			int before = repositories.loadedCommits(root, MAX_LISTED_COMMITS).size();
+			repositories.loadPage(root, selected.node().value(), pageDepth(root), () -> unloading || cancelled(cancelled));
+			int added = repositories.loadedCommits(root, MAX_LISTED_COMMITS).size() - before;
+			adaptPageDepth(root, added);
+		} else {
+			// A local repository has its whole history already; the entry only raises the limit.
+			int limit;
+			try {
+				limit = Math.min(Integer.parseInt(selected.node().value()), MAX_LISTED_COMMITS);
+			} catch (NumberFormatException e) {
+				limit = MAX_COMMITS;
+			}
+			commitLimits.merge(root.toString(), limit, Math::max);
+		}
 		GitNode commits = new GitNode(GitNode.Kind.COMMITS, root.toString(), "HEAD", null, null);
 		return listCommits(resource(commits, GitNode.repository(root.toString()), "Commits", true, null, 0), cancelled);
 	}
@@ -489,10 +518,12 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		var items = new ArrayList<NuclrMenuResource>();
 		if (source instanceof GitResource resource && canView(resource)) items.add(menu("View", "F3", VIEW));
 		items.add(menu("Copy", "F5", COPY));
-		if (currentFolder == null || currentFolder.node().kind() == GitNode.Kind.ROOT) {
+		Path root = repositoryOf(currentFolder);
+		if (root == null) {
+			// The repository list: nothing to commit or stage here, only entries to add and remove.
+			items.add(menu("From Other Panel", "F7", OPEN_OTHER));
 			items.add(menu("Remove", "F8", REMOVE_RECENT));
-		}
-		if (!isBare(repositoryOf(currentFolder))) {
+		} else if (!isBare(root)) {
 			items.add(menu("Commit", "F2", COMMIT));
 			items.add(menu("Diff", "Shift+F3", DIFF));
 			items.add(menu("Stage", "Shift+F5", STAGE));
@@ -622,6 +653,7 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			case STASH_APPLY -> stash(focused, false, callback);
 			case STASH_DROP -> stash(focused, true, callback);
 			case REMOVE_RECENT, DELETE_KEY -> removeRecent(focused);
+			case OPEN_OTHER -> addFromOtherPanel(other);
 			default -> LOG.debug("Git panel ignoring action [{}]", actionType);
 		}
 	}
@@ -847,6 +879,31 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 			}
 			requestRefresh(uuid);
 		});
+	}
+
+	/**
+	 * Puts the repository the opposite panel is in at the top of the list, saving the
+	 * folder chooser for the repository that is usually already on screen.
+	 */
+	private void addFromOtherPanel(BaseNuclrPlugin other) {
+		NuclrResource folder = other == null || other == this ? null : other.getCurrentResource();
+		Path path = folder != null ? folder.getPath() : null;
+		if (path == null || !Files.isDirectory(path)) {
+			GitDialogs.error("Git", "The other panel is not showing a folder on this computer.");
+			return;
+		}
+		try {
+			Path root = repositories.findRepository(path);
+			if (root == null) {
+				GitDialogs.error("Git", "No Git repository was found at or above " + path);
+				return;
+			}
+			infoCache.put(root.toString(), repositories.info(root));
+			rememberRepository(root);
+			requestRefresh(uuid);
+		} catch (IOException e) {
+			GitDialogs.error("Git", e.getMessage());
+		}
 	}
 
 	private void runRead(String title, IoSupplier<String> supplier) {
@@ -1206,9 +1263,30 @@ public final class GitFilePanelPlugin implements FilePanelNuclrPlugin {
 		if (cached != null && System.nanoTime() - cached.createdAtNanos() < STATUS_CACHE_NANOS) {
 			return cached.snapshot();
 		}
-		GitStatusSnapshot snapshot = repositories.status(root);
+		GitStatusSnapshot snapshot = isBare(root) ? GitStatusSnapshot.empty() : nativeStatus(root);
+		if (snapshot == null) snapshot = repositories.status(root);
 		statusCache.put(root.toString(), new CachedStatus(snapshot, System.nanoTime()));
 		return snapshot;
+	}
+
+	/**
+	 * Status from native git, which keeps its own caches of what changed (stat data in the
+	 * index, the untracked cache, fsmonitor) where JGit hashes its way through the whole
+	 * tree each time; on a large repository that is the difference between instant and
+	 * seconds. {@code null} when there is no git, or its answer is not one to trust.
+	 */
+	private GitStatusSnapshot nativeStatus(Path root) {
+		if (!Boolean.TRUE.equals(nativeGitAvailable)) return null;
+		try {
+			// No optional locks: a listing must never hold up the user's own git in a terminal.
+			NativeGitRunner.Result result = nativeGit.runForOutput(root, () -> unloading, "--no-optional-locks",
+					"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching");
+			if (!result.succeeded() || result.truncated()) return null;
+			return GitStatusSnapshot.fromPorcelain(result.output());
+		} catch (IOException e) {
+			LOG.debug("Native git status failed in {}, reading it with JGit", root, e);
+			return null;
+		}
 	}
 
 	private void refresh() {

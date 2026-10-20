@@ -231,18 +231,20 @@ final class GitRepositoryService {
 	}
 
 	private List<TreeEntry> readTree(Path root, String revision, String relativePath) throws IOException {
-		try (Repository repository = open(root)) {
+		// One reader for the walk and every size: opening each object through the repository
+		// starts a reader of its own, which a folder of thousands of files pays for thousands of times.
+		try (Repository repository = open(root); ObjectReader reader = repository.newObjectReader()) {
 			ObjectId tree = repository.resolve(revision + "^{tree}");
 			if (tree == null) return List.of();
 			String path = GitNode.normalizeGitPath(relativePath);
 			if (!path.isEmpty()) {
-				try (TreeWalk found = TreeWalk.forPath(repository, path, tree)) {
+				try (TreeWalk found = TreeWalk.forPath(repository, reader, path, tree)) {
 					if (found == null || !FileMode.TREE.equals(found.getFileMode(0))) return List.of();
 					tree = found.getObjectId(0);
 				}
 			}
 			var entries = new ArrayList<TreeEntry>();
-			try (TreeWalk walk = new TreeWalk(repository)) {
+			try (TreeWalk walk = new TreeWalk(repository, reader)) {
 				walk.addTree(tree);
 				walk.setRecursive(false);
 				while (walk.next()) {
@@ -254,7 +256,7 @@ final class GitRepositoryService {
 					ObjectId objectId = walk.getObjectId(0);
 					// -1: the file has not been downloaded, and is not fetched just to be measured.
 					long size = directory || gitlink ? 0L
-							: repository.getObjectDatabase().has(objectId) ? repository.open(objectId).getSize() : -1L;
+							: reader.has(objectId) ? reader.getObjectSize(objectId, Constants.OBJ_BLOB) : -1L;
 					String childPath = path.isEmpty() ? walk.getNameString() : path + "/" + walk.getNameString();
 					entries.add(new TreeEntry(walk.getNameString(), childPath, objectId.name(), directory,
 							symlink, gitlink, executable, size));

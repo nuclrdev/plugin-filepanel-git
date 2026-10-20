@@ -19,7 +19,8 @@ final class NativeGitRunner {
 
 	private static final int MAX_OUTPUT = 2 * 1024 * 1024;
 
-	record Result(int exitCode, String output) {
+	/** {@code truncated}: the output reached the cap and the rest was dropped. */
+	record Result(int exitCode, String output, boolean truncated) {
 		boolean succeeded() { return exitCode == 0; }
 	}
 
@@ -51,6 +52,19 @@ final class NativeGitRunner {
 	}
 
 	Result run(Path repository, BooleanSupplier cancelled, String... arguments) throws IOException {
+		return run(repository, cancelled, true, arguments);
+	}
+
+	/**
+	 * Runs a command whose output is parsed rather than shown: warnings on stderr are
+	 * dropped, so they cannot be mistaken for records.
+	 */
+	Result runForOutput(Path repository, BooleanSupplier cancelled, String... arguments) throws IOException {
+		return run(repository, cancelled, false, arguments);
+	}
+
+	private Result run(Path repository, BooleanSupplier cancelled, boolean withErrors, String... arguments)
+			throws IOException {
 		var command = new ArrayList<String>();
 		command.add("git");
 		command.add("--no-pager");
@@ -62,7 +76,9 @@ final class NativeGitRunner {
 		command.add("color.ui=false");
 		command.addAll(List.of(arguments));
 
-		ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+		ProcessBuilder builder = new ProcessBuilder(command);
+		if (withErrors) builder.redirectErrorStream(true);
+		else builder.redirectError(ProcessBuilder.Redirect.DISCARD);
 		builder.environment().put("GIT_PAGER", "cat");
 		builder.environment().put("GIT_EDITOR", "true");
 		builder.environment().put("GIT_TERMINAL_PROMPT", "0");
@@ -88,7 +104,8 @@ final class NativeGitRunner {
 				reader.join(100);
 			}
 			synchronized (output) {
-				return new Result(process.exitValue(), output.toString(StandardCharsets.UTF_8));
+				return new Result(process.exitValue(), output.toString(StandardCharsets.UTF_8),
+						output.size() >= MAX_OUTPUT);
 			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
