@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
@@ -50,6 +52,7 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 
 	@Override
 	public void preinit(NuclrPluginContext context) {
+		if (context != null) Messages.use(context.getLocale());
 		this.context = context;
 		updateTheme(context != null ? context.getTheme() : null);
 	}
@@ -80,16 +83,16 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 		long request = ++generation;
 		SwingUtilities.invokeLater(() -> {
 			title.setText(resource.getName());
-			text.setText("Loading Git information…");
+			text.setText(tr("quick.loading"));
 		});
 		Thread.ofVirtual().name("git-quick-view").start(() -> {
 			String content;
 			try {
 				content = render(git, cancelled);
 			} catch (Exception e) {
-				content = "Unable to load Git information.\n\n" + e.getMessage();
+				content = tr("quick.failed", e.getMessage());
 			}
-			String rendered = content == null || content.isBlank() ? "No changes." : content;
+			String rendered = content == null || content.isBlank() ? tr("quick.no.changes") : content;
 			SwingUtilities.invokeLater(() -> {
 				if (request == generation && !isCancelled(cancelled)) {
 					text.setText(rendered);
@@ -110,15 +113,15 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 				if (isCancelled(cancelled)) yield "";
 				String working = repositories.workingDiff(root, node.relativePath(), false);
 				StringBuilder result = new StringBuilder();
-				if (!staged.isBlank()) result.append("STAGED\n======\n").append(staged);
+				if (!staged.isBlank()) result.append(heading(tr("quick.staged"))).append(staged);
 				if (!working.isBlank()) {
 					if (!result.isEmpty()) result.append("\n");
-					result.append("WORKING TREE\n============\n").append(working);
+					result.append(heading(tr("quick.working.tree"))).append(working);
 				}
 				yield result.toString();
 			}
 			case COMMIT, REF, STASH -> repositories.commitDetails(root, node.revision());
-			case REVISION_BLOB -> "Git submodule entry\n\nCommit: " + node.value();
+			case REVISION_BLOB -> tr("quick.submodule", node.value());
 			default -> "";
 		};
 	}
@@ -156,7 +159,12 @@ public final class GitQuickViewPlugin implements QuickViewNuclrPlugin {
 	@Override public boolean onFocusGained() { return false; }
 	@Override public void onFocusLost() { }
 	@Override public boolean isFocused() { return false; }
-	@Override public String getWindowTitle() { return currentResource == null ? "Git Quick View" : "Git: " + currentResource.getName(); }
+	@Override public String getWindowTitle() { return currentResource == null ? tr("quick.window.title") : "Git: " + currentResource.getName(); }
+
+	/** A title underlined with as many {@code =} as it has characters. */
+	private static String heading(String title) {
+		return title + "\n" + "=".repeat(title.length()) + "\n";
+	}
 
 	private static boolean isCancelled(AtomicBoolean cancelled) {
 		return Thread.currentThread().isInterrupted() || cancelled != null && cancelled.get();

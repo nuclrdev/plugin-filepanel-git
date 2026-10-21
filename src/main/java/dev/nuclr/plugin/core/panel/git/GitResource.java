@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -95,7 +97,7 @@ final class GitResource extends NuclrResource {
 			String details = new GitRepositoryService().commitDetails(Path.of(node.repository()), node.revision());
 			return new ByteArrayInputStream(details.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 		}
-		if (folder) throw new IOException("Cannot read a Git directory.");
+		if (folder) throw new IOException(tr("error.read.directory"));
 		if (node.kind() == GitNode.Kind.WORKTREE_FILE && path != null) {
 			return Files.newInputStream(path, options);
 		}
@@ -107,7 +109,7 @@ final class GitResource extends NuclrResource {
 		if (node.kind() == GitNode.Kind.REVISION_BLOB && !node.value().isBlank()) {
 			return new GitRepositoryService().openBlob(Path.of(node.repository()), node.value());
 		}
-		throw new IOException("This Git resource has no directly readable content.");
+		throw new IOException(tr("error.read.no.content"));
 	}
 
 	static boolean isGit(NuclrResource resource) {

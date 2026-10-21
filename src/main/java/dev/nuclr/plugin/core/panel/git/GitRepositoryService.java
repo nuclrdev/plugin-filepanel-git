@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -107,7 +109,7 @@ final class GitRepositoryService {
 			if (repository.isBare()) return GitStatusSnapshot.empty();
 			return GitStatusSnapshot.from(git.status().call());
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to read repository status", e);
+			throw new IOException(tr("error.status"), e);
 		}
 	}
 
@@ -117,7 +119,7 @@ final class GitRepositoryService {
 			if (remote) command.setListMode(ListMode.REMOTE);
 			return refs(repository, command.call());
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to list branches", e);
+			throw new IOException(tr("error.list.branches"), e);
 		}
 	}
 
@@ -125,7 +127,7 @@ final class GitRepositoryService {
 		try (Repository repository = open(root); Git git = new Git(repository)) {
 			return refs(repository, git.tagList().call());
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to list tags", e);
+			throw new IOException(tr("error.list.tags"), e);
 		}
 	}
 
@@ -138,7 +140,7 @@ final class GitRepositoryService {
 			}
 			return result;
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to list stashes", e);
+			throw new IOException(tr("error.list.stashes"), e);
 		}
 	}
 
@@ -152,7 +154,7 @@ final class GitRepositoryService {
 			}
 			return result;
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to list commits", e);
+			throw new IOException(tr("error.list.commits"), e);
 		}
 	}
 
@@ -314,10 +316,10 @@ final class GitRepositoryService {
 		String objectId;
 		try (Repository repository = open(root)) {
 			ObjectId tree = repository.resolve(revision + "^{tree}");
-			if (tree == null) throw new IOException("Revision not found: " + revision);
+			if (tree == null) throw new IOException(tr("error.revision.not.found", revision));
 			try (TreeWalk found = TreeWalk.forPath(repository, normalized, tree)) {
 				if (found == null || FileMode.TREE.equals(found.getFileMode(0))) {
-					throw new IOException("File not found in " + revision + ": " + normalized);
+					throw new IOException(tr("error.file.not.found", revision, normalized));
 				}
 				objectId = found.getObjectId(0).name();
 			}
@@ -359,7 +361,7 @@ final class GitRepositoryService {
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
 				DiffFormatter formatter = formatter(repository, output)) {
 			ObjectId id = repository.resolve(revision + "^{commit}");
-			if (id == null) return "Commit not found: " + revision;
+			if (id == null) return tr("error.commit.not.found", revision);
 			if (isOnDemand(repository)) return onDemandCommitDetails(root, repository, id);
 			RevCommit commit = walk.parseCommit(id);
 			StringBuilder header = new StringBuilder()
@@ -418,7 +420,7 @@ final class GitRepositoryService {
 				DiffFormatter formatter = formatter(repository, output);
 				ObjectReader reader = repository.newObjectReader()) {
 			ObjectId tree = repository.resolve(revision + "^{tree}");
-			if (tree == null) return "Revision not found: " + revision;
+			if (tree == null) return tr("error.revision.not.found", revision);
 			CanonicalTreeParser oldTree = new CanonicalTreeParser();
 			oldTree.reset(reader, tree);
 			if (!blank(path)) formatter.setPathFilter(PathFilter.create(GitNode.normalizeGitPath(path)));
@@ -442,7 +444,7 @@ final class GitRepositoryService {
 			}
 			return result.toString();
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to read file history", e);
+			throw new IOException(tr("error.history"), e);
 		}
 	}
 
@@ -450,7 +452,7 @@ final class GitRepositoryService {
 		try (Repository repository = open(root); Git git = new Git(repository)) {
 			requireFullHistory(repository);
 			BlameResult blame = git.blame().setFilePath(GitNode.normalizeGitPath(path)).call();
-			if (blame == null || blame.getResultContents() == null) return "No blame information available.";
+			if (blame == null || blame.getResultContents() == null) return tr("blame.none");
 			StringBuilder result = new StringBuilder();
 			int count = Math.min(blame.getResultContents().size(), maxLines);
 			for (int line = 0; line < count; line++) {
@@ -460,16 +462,16 @@ final class GitRepositoryService {
 				result.append(String.format("%s %-18s %5d  %s%n", id, abbreviate(author, 18), line + 1,
 						blame.getResultContents().getString(line)));
 			}
-			if (blame.getResultContents().size() > count) result.append("\n… output truncated …\n");
+			if (blame.getResultContents().size() > count) result.append("\n").append(tr("blame.truncated")).append("\n");
 			return result.toString();
 		} catch (GitAPIException e) {
-			throw new IOException("Unable to blame file", e);
+			throw new IOException(tr("error.blame"), e);
 		}
 	}
 
 	private static void requireFullHistory(Repository repository) throws IOException {
 		if (isOnDemand(repository)) {
-			throw new IOException("File history and blame need the full history. Use \"Download full history\" first.");
+			throw new IOException(tr("error.full.history.needed"));
 		}
 	}
 
@@ -531,7 +533,7 @@ final class GitRepositoryService {
 
 	private static Repository open(Path root) throws IOException {
 		Repository repository = openDiscovered(root);
-		if (repository == null) throw new IOException("Not a Git repository: " + root);
+		if (repository == null) throw new IOException(tr("error.not.repository", root));
 		return repository;
 	}
 

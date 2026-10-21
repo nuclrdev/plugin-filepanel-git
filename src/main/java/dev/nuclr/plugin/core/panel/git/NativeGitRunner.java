@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,7 +31,8 @@ final class NativeGitRunner {
 		private final int exitCode;
 
 		GitCommandException(String operation, Result result) {
-			super(operation + " failed" + (result.output().isBlank() ? "." : ":\n" + result.output().strip()));
+			super(result.output().isBlank() ? tr("error.operation.failed", operation)
+					: tr("error.operation.failed.output", operation, result.output().strip()));
 			this.exitCode = result.exitCode();
 		}
 
@@ -40,7 +43,7 @@ final class NativeGitRunner {
 	static final class CancelledException extends IOException {
 		private static final long serialVersionUID = 1L;
 
-		CancelledException() { super("Git operation cancelled."); }
+		CancelledException() { super(tr("error.cancelled")); }
 	}
 
 	boolean available() {

@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryNotEmptyException;
@@ -96,7 +98,7 @@ final class RemoteMirrors {
 	}
 
 	private void createOnDemand(String url, Path target, BooleanSupplier cancelled) throws IOException {
-		nativeGit.requireSuccess("Create repository", null, cancelled, "init", "--quiet", "--bare", target.toString());
+		nativeGit.requireSuccess(tr("op.create.repository"), null, cancelled, "init", "--quiet", "--bare", target.toString());
 		String[][] settings = {
 				{ "remote.origin.url", url },
 				{ "remote.origin.fetch", "+refs/heads/*:refs/heads/*" },
@@ -108,9 +110,9 @@ final class RemoteMirrors {
 				{ "maintenance.auto", "false" },
 				{ GitRepositoryService.ON_DEMAND_SECTION + "." + GitRepositoryService.ON_DEMAND_KEY, "true" } };
 		for (String[] setting : settings) {
-			nativeGit.requireSuccess("Configure repository", target, cancelled, "config", setting[0], setting[1]);
+			nativeGit.requireSuccess(tr("op.configure.repository"), target, cancelled, "config", setting[0], setting[1]);
 		}
-		nativeGit.requireSuccess("Configure repository", target, cancelled,
+		nativeGit.requireSuccess(tr("op.configure.repository"), target, cancelled,
 				"config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*");
 		new LazyRemote(nativeGit).refreshRefs(target, cancelled);
 	}
@@ -139,18 +141,18 @@ final class RemoteMirrors {
 	/** Deletes a mirror; refuses paths outside the cache. */
 	void remove(Path mirror) throws IOException {
 		if (!isMirror(mirror) || mirror.toAbsolutePath().normalize().equals(cacheRoot)) {
-			throw new IOException("Not a cached remote mirror: " + mirror);
+			throw new IOException(tr("error.not.mirror", mirror));
 		}
 		delete(mirror);
 	}
 
 	static String validate(String url) throws IOException {
 		String value = url == null ? "" : url.strip();
-		if (value.isEmpty()) throw new IOException("Enter a repository URL.");
+		if (value.isEmpty()) throw new IOException(tr("error.url.empty"));
 		// "--" already stops option parsing; this rejects option-looking input early
 		// with a clearer message, and keeps the value out of any other argv slot.
-		if (value.startsWith("-")) throw new IOException("Not a repository URL: " + value);
-		if (value.chars().anyMatch(Character::isISOControl)) throw new IOException("The URL contains control characters.");
+		if (value.startsWith("-")) throw new IOException(tr("error.url.invalid", value));
+		if (value.chars().anyMatch(Character::isISOControl)) throw new IOException(tr("error.url.control"));
 		return value;
 	}
 
@@ -201,7 +203,7 @@ final class RemoteMirrors {
 				try {
 					Files.delete(dir);
 				} catch (DirectoryNotEmptyException e) {
-					throw new IOException("Unable to delete " + dir, e);
+					throw new IOException(tr("error.delete", dir), e);
 				}
 				return FileVisitResult.CONTINUE;
 			}

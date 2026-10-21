@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -48,14 +50,14 @@ final class LazyRemote {
 	 */
 	void ensure(Path root, AnyObjectId id) throws IOException {
 		synchronized (lock(root)) {
-			nativeGit.requireSuccess("Download " + id.abbreviate(8).name(), root, null, "cat-file", "-t", id.name());
+			nativeGit.requireSuccess(tr("op.download", id.abbreviate(8).name()), root, null, "cat-file", "-t", id.name());
 		}
 	}
 
 	/** Fetches {@code commit} and its ancestors {@code depth} steps deep, without trees or files. */
 	void fetchCommits(Path root, String commit, int depth, BooleanSupplier cancelled) throws IOException {
 		synchronized (lock(root)) {
-			nativeGit.requireSuccess("Fetch history", root, cancelled, "fetch", "--quiet", "--no-tags",
+			nativeGit.requireSuccess(tr("op.fetch.history"), root, cancelled, "fetch", "--quiet", "--no-tags",
 					"--no-write-fetch-head", "--depth=" + Math.max(1, depth), "--filter=tree:0", "origin", commit);
 		}
 	}
@@ -64,11 +66,11 @@ final class LazyRemote {
 	void refreshRefs(Path root, BooleanSupplier cancelled) throws IOException {
 		synchronized (lock(root)) {
 			NativeGitRunner.Result head = nativeGit.run(root, cancelled, "ls-remote", "--symref", "origin", "HEAD");
-			if (!head.succeeded()) throw new NativeGitRunner.GitCommandException("Contact remote", head);
-			nativeGit.requireSuccess("Fetch branches and tags", root, cancelled, "fetch", "--quiet", "--prune",
+			if (!head.succeeded()) throw new NativeGitRunner.GitCommandException(tr("op.contact.remote"), head);
+			nativeGit.requireSuccess(tr("op.fetch.refs"), root, cancelled, "fetch", "--quiet", "--prune",
 					"--depth=1", "--filter=tree:0", "origin");
 			String branch = defaultBranch(head.output());
-			if (branch != null) nativeGit.requireSuccess("Set HEAD", root, cancelled, "symbolic-ref", "HEAD", branch);
+			if (branch != null) nativeGit.requireSuccess(tr("op.set.head"), root, cancelled, "symbolic-ref", "HEAD", branch);
 			// Branch tips moved, so pages anchored at the old HEAD no longer describe it.
 			Files.deleteIfExists(root.resolve(PAGES_FILE));
 		}
@@ -86,7 +88,7 @@ final class LazyRemote {
 	}
 
 	void addPage(Path root, String commit) throws IOException {
-		if (!ObjectId.isId(commit)) throw new IOException("Not a commit id: " + commit);
+		if (!ObjectId.isId(commit)) throw new IOException(tr("error.not.commit.id", commit));
 		Files.writeString(root.resolve(PAGES_FILE), commit + "\n", StandardCharsets.UTF_8,
 				StandardOpenOption.CREATE, StandardOpenOption.APPEND);
 	}

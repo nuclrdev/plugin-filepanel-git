@@ -4,6 +4,8 @@
  */
 package dev.nuclr.plugin.core.panel.git;
 
+import static dev.nuclr.plugin.core.panel.git.Messages.tr;
+
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GraphicsEnvironment;
@@ -27,7 +29,7 @@ final class GitDialogs {
 		if (GraphicsEnvironment.isHeadless()) return null;
 		return onEdt(() -> {
 			JFileChooser chooser = new JFileChooser(initial != null ? initial.toFile() : null);
-			chooser.setDialogTitle("Open Git Repository");
+			chooser.setDialogTitle(tr("dialog.choose.repository"));
 			chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
 			chooser.setAcceptAllFileFilterUsed(false);
 			return chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION
@@ -41,7 +43,7 @@ final class GitDialogs {
 			JTextArea text = new JTextArea(8, 64);
 			text.setLineWrap(true);
 			text.setWrapStyleWord(true);
-			int choice = JOptionPane.showConfirmDialog(null, new JScrollPane(text), "Commit staged changes",
+			int choice = JOptionPane.showConfirmDialog(null, new JScrollPane(text), tr("commit.title"),
 					JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 			String value = text.getText().strip();
 			return choice == JOptionPane.OK_OPTION && !value.isBlank() ? value : null;
@@ -71,7 +73,7 @@ final class GitDialogs {
 		int width = Math.min(1000, bounds.width * 3 / 4);
 		int height = Math.min(700, bounds.height * 3 / 4);
 		SwingUtilities.invokeLater(() -> {
-			JTextArea text = new JTextArea(content == null || content.isBlank() ? "No output." : content);
+			JTextArea text = new JTextArea(content == null || content.isBlank() ? tr("dialog.no.output") : content);
 			text.setEditable(false);
 			text.setCaretPosition(0);
 			text.setFont(new Font(Font.MONOSPACED, Font.PLAIN,
@@ -85,7 +87,7 @@ final class GitDialogs {
 	static void error(String title, String message) {
 		if (GraphicsEnvironment.isHeadless()) return;
 		SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(null,
-				message == null || message.isBlank() ? "The Git operation failed." : message,
+				message == null || message.isBlank() ? tr("dialog.operation.failed") : message,
 				title, JOptionPane.ERROR_MESSAGE));
 	}
 

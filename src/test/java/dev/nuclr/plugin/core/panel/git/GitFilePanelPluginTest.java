@@ -362,7 +362,7 @@ class GitFilePanelPluginTest {
 		var categories = plugin.openResource(repository, null);
 		assertFalse(categories.getEntries().stream().anyMatch(entry -> entry.getName().equals("Working Tree")));
 		assertTrue(categories.getEntries().stream().anyMatch(entry -> entry.getName().equals("Branches")));
-		assertTrue(plugin.getCurrentLocationDisplayText().startsWith("origin-repo — "));
+		assertTrue(plugin.getCurrentLocationDisplayText().startsWith("origin-repo - "));
 
 		var actions = plugin.contextMenuItems(repository, List.of(repository)).stream()
 				.map(item -> item.getActionType()).toList();
