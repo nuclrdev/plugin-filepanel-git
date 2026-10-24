@@ -12,6 +12,7 @@ import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
@@ -71,7 +72,9 @@ final class RemoteMirrors {
 		String clean = validate(url);
 		Path mirror = pathFor(clean);
 		if (Files.isRegularFile(mirror.resolve("HEAD"))) {
-			nativeGit.requireSuccess("Fetch " + clean, mirror, cancelled, "fetch", "--prune");
+			// Mirrors cloned before maintenance was switched off would otherwise start it after the fetch.
+			nativeGit.requireSuccess("Fetch " + clean, mirror, cancelled,
+					"-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--prune");
 			return mirror;
 		}
 		Path onDemand = onDemandPathFor(clean);
@@ -91,7 +94,8 @@ final class RemoteMirrors {
 		Path mirror = pathFor(clean);
 		if (!Files.isRegularFile(mirror.resolve("HEAD"))) {
 			build(mirror, partial -> nativeGit.requireSuccess("Clone " + clean, null, cancelled,
-					"clone", "--mirror", "--", clean, partial.toString()));
+					"clone", "--mirror", "--config", "gc.auto=0", "--config", "maintenance.auto=false",
+					"--", clean, partial.toString()));
 		}
 		delete(onDemandPathFor(clean));
 		return mirror;
@@ -198,6 +202,12 @@ final class RemoteMirrors {
 				return FileVisitResult.CONTINUE;
 			}
 
+			// A lock file a background Git process removed while we walked is already gone.
+			@Override public FileVisitResult visitFileFailed(Path file, IOException failure) throws IOException {
+				if (failure instanceof NoSuchFileException) return FileVisitResult.CONTINUE;
+				throw failure;
+			}
+
 			@Override public FileVisitResult postVisitDirectory(Path dir, IOException failure) throws IOException {
 				if (failure != null) throw failure;
 				try {
@@ -214,6 +224,8 @@ final class RemoteMirrors {
 	private static void deleteWritable(Path file) throws IOException {
 		try {
 			Files.delete(file);
+		} catch (NoSuchFileException e) {
+			// Already gone.
 		} catch (IOException e) {
 			DosFileAttributeView dos = Files.getFileAttributeView(file, DosFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
 			if (dos == null) throw e;
